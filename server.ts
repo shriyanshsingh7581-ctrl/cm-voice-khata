@@ -3,105 +3,259 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, ThinkingLevel, Type, type GenerateContentParameters } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function getGroqKey(): string {
-  return process.env.GROQ_API_KEY || '';
-}
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-function getGeminiClient(apiVersion?: string) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured. Please check Settings > Secrets.');
+// Dedicated low-cost OpenRouter models per task
+const MODELS = {
+  // Paper Bill Vision Scanner (accurate GST table OCR)
+  billScan: ['google/gemini-2.5-flash', 'google/gemini-3.1-flash-lite-preview'],
+  // Digital Bill & Item Generator (ultra-cheap fast JSON extraction)
+  billGenerate: ['google/gemini-2.5-flash-lite', 'openai/gpt-4.1-nano'],
+  // Voice Speech-to-Text Transcription
+  voiceTranscribe: ['google/gemini-2.5-flash-lite', 'google/gemini-2.5-flash'],
+  // Voice Text-to-Speech Readout
+  voiceTts: ['openai/gpt-audio-mini', 'openai/gpt-audio'],
+};
+
+function getOpenRouterKey(): string {
+  const key = (process.env.OPENROUTER_API_KEY || '').trim();
+  if (!key) {
+    throw new Error('OPENROUTER_API_KEY is not configured. Please add it to .env or Secrets.');
   }
-  return new GoogleGenAI({
-    apiKey,
-    ...(apiVersion ? { apiVersion } : {}),
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  return key;
 }
 
-function isRetryableUpstreamError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return (
-    msg.includes('503') ||
-    msg.includes('429') ||
-    msg.includes('UNAVAILABLE') ||
-    msg.includes('RESOURCE_EXHAUSTED') ||
-    msg.includes('high demand') ||
-    msg.includes('overloaded') ||
-    msg.includes('ECONNRESET') ||
-    msg.includes('ETIMEDOUT') ||
-    msg.includes('fetch failed') ||
-    msg.includes('timed out') ||
-    msg.includes('500')
-  );
+class HttpStatusError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
 }
 
 function isApiKeyError(err: unknown): boolean {
+  if (err instanceof HttpStatusError && (err.status === 401 || err.status === 403)) {
+    return true;
+  }
   const msg = err instanceof Error ? err.message : String(err);
   return (
-    msg.includes('API_KEY_INVALID') ||
-    msg.includes('PERMISSION_DENIED') ||
-    msg.includes('API key not valid') ||
-    msg.includes('not configured')
+    msg.includes('OPENROUTER_API_KEY') ||
+    msg.includes('No auth credentials') ||
+    msg.includes('Invalid API key') ||
+    msg.includes('User not found')
   );
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms = 9000): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`Gemini request timed out after ${ms}ms`)), ms)
-    ),
-  ]);
+function isRetryableUpstreamError(status: number, msg: string): boolean {
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    msg.includes('timed out') ||
+    msg.includes('overloaded') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('fetch failed')
+  );
 }
 
-async function generateContentWithFallback(
+async function callOpenRouterWithFallback(
   models: string[],
-  buildParams: (model: string) => GenerateContentParameters,
-  options?: { apiVersion?: string; timeoutMs?: number }
-) {
-  const ai = getGeminiClient(options?.apiVersion);
+  buildBody: (model: string) => Record<string, unknown>,
+  timeoutMs = 15000
+): Promise<{ content: string; model: string }> {
+  const apiKey = getOpenRouterKey();
   let lastError: unknown;
-  const timeoutMs = options?.timeoutMs ?? 9000;
 
   for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        const response = await withTimeout(
-          ai.models.generateContent(buildParams(model)),
-          timeoutMs
-        );
-        return { response, model };
-      } catch (err) {
-        lastError = err;
-        if (isApiKeyError(err)) {
-          throw err;
+        const res = await fetch(OPENROUTER_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+            'HTTP-Referer': process.env.APP_URL || 'http://localhost:3000',
+            'X-Title': 'CM Voice Khata',
+          },
+          signal: controller.signal,
+          body: JSON.stringify(buildBody(model)),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => '');
+          let errMsg = `OpenRouter HTTP ${res.status}`;
+          try {
+            const parsed = JSON.parse(errText) as { error?: { message?: string } };
+            if (parsed.error?.message) errMsg = parsed.error.message;
+          } catch {
+            if (errText) errMsg = errText.slice(0, 200);
+          }
+
+          if (res.status === 401 || res.status === 403) {
+            throw new HttpStatusError(res.status, errMsg);
+          }
+          if (isRetryableUpstreamError(res.status, errMsg) && attempt === 0) {
+            lastError = new HttpStatusError(res.status, errMsg);
+            await new Promise((r) => setTimeout(r, 350));
+            continue;
+          }
+          throw new HttpStatusError(res.status, errMsg);
         }
-        if (isRetryableUpstreamError(err) && attempt === 0) {
-          await new Promise((r) => setTimeout(r, 350));
+
+        const data = (await res.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const content = data.choices?.[0]?.message?.content;
+        if (content && content.trim()) {
+          return { content: content.trim(), model };
+        }
+        throw new Error(`OpenRouter model ${model} returned empty content`);
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          lastError = new Error(`OpenRouter request timed out after ${timeoutMs}ms`);
+        } else {
+          lastError = err;
+        }
+        if (isApiKeyError(lastError)) {
+          throw lastError;
+        }
+        if (attempt === 0 && lastError instanceof Error && lastError.message.includes('timed out')) {
           continue;
         }
         break;
+      } finally {
+        clearTimeout(timer);
       }
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Gemini request failed'));
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'OpenRouter request failed'));
+}
+
+function createWavFromPcm16(pcmBuffer: Buffer, sampleRate = 24000, channels = 1): Buffer {
+  const byteRate = sampleRate * channels * 2;
+  const blockAlign = channels * 2;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + pcmBuffer.length, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size (PCM)
+  header.writeUInt16LE(1, 20); // AudioFormat = 1 (PCM)
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34); // BitsPerSample
+  header.write('data', 36);
+  header.writeUInt32LE(pcmBuffer.length, 40);
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+async function callOpenRouterTtsStream(
+  models: string[],
+  text: string,
+  voice: string,
+  stylePrompt: string,
+  timeoutMs = 15000
+): Promise<{ audioBase64: string; mimeType: string; model: string }> {
+  const apiKey = getOpenRouterKey();
+  let lastError: unknown;
+
+  for (const model of models) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(OPENROUTER_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'HTTP-Referer': process.env.APP_URL || 'http://localhost:3000',
+          'X-Title': 'CM Voice Khata',
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model,
+          stream: true,
+          modalities: ['text', 'audio'],
+          audio: { voice, format: 'pcm16' },
+          messages: [
+            {
+              role: 'system',
+              content: `You are a text-to-speech voice assistant. ${stylePrompt}. Read the user's text aloud verbatim without adding extra commentary.`,
+            },
+            {
+              role: 'user',
+              content: text,
+            },
+          ],
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new HttpStatusError(res.status, errText.slice(0, 200) || `OpenRouter TTS HTTP ${res.status}`);
+      }
+
+      const rawSse = await res.text();
+      const b64Chunks: string[] = [];
+      for (const line of rawSse.split('\n')) {
+        if (!line.startsWith('data: ') || line.includes('[DONE]')) continue;
+        try {
+          const parsed = JSON.parse(line.slice(6)) as {
+            choices?: Array<{ delta?: { audio?: { data?: string } } }>;
+          };
+          const chunk = parsed.choices?.[0]?.delta?.audio?.data;
+          if (chunk) b64Chunks.push(chunk);
+        } catch {
+          // skip partial SSE line
+        }
+      }
+
+      if (b64Chunks.length > 0) {
+        const pcmBuf = Buffer.concat(b64Chunks.map((c) => Buffer.from(c, 'base64')));
+        const wavBuf = createWavFromPcm16(pcmBuf, 24000, 1);
+        return {
+          audioBase64: wavBuf.toString('base64'),
+          mimeType: 'audio/wav',
+          model,
+        };
+      }
+      throw new Error(`OpenRouter model ${model} returned empty audio stream`);
+    } catch (err) {
+      lastError = err;
+      if (isApiKeyError(err)) throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('OpenRouter TTS audio generation failed');
 }
 
 function extractJsonText(raw: string | undefined): string {
   const trimmed = (raw ?? '{}').trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   return fenceMatch ? fenceMatch[1].trim() : trimmed;
+}
+
+function getAudioFormatFromMime(mimeType: string): string {
+  const m = (mimeType || '').toLowerCase();
+  if (m.includes('wav')) return 'wav';
+  if (m.includes('mp3') || m.includes('mpeg')) return 'mp3';
+  if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return 'mp4';
+  if (m.includes('ogg')) return 'ogg';
+  if (m.includes('flac')) return 'flac';
+  return 'webm';
 }
 
 // Smart deterministic Hinglish/Hindi fallback parser if network/rate-limits occur
@@ -300,7 +454,9 @@ function fallbackParseItem(transcript: string) {
   const gstMatch = clean.match(/(?:gst|tax)\s*(\d+(?:\.\d+)?)/i);
   const unitMatch = clean.match(/\b(kg|kilo|gm|gram|ltr|litre|pcs|piece|pkt|packet|bag|box|dozen)\b/i);
 
-  const firstWordMatch = clean.match(/^([a-zA-Z\u0900-\u097F][a-zA-Z0-9\u0900-\u097F\s]{1,28}?)(?=\s+(?:\d|sale|purchase|stock|gst|kg|pcs|pkt|ltr|bag|box|$))/i);
+  const firstWordMatch = clean.match(
+    /^([a-zA-Z\u0900-\u097F][a-zA-Z0-9\u0900-\u097F\s]{1,28}?)(?=\s+(?:\d|sale|purchase|stock|gst|kg|pcs|pkt|ltr|bag|box|$))/i
+  );
   const name = (firstWordMatch?.[1] || clean.split(/\s+/).slice(0, 2).join(' ') || 'New Item').trim();
 
   const nums = [...clean.matchAll(/\b(\d+(?:\.\d+)?)\b/g)].map((m) => parseFloat(m[1]));
@@ -323,89 +479,55 @@ async function startServer() {
 
   app.use(express.json({ limit: '25mb' }));
 
-  // 1. Universal Audio Transcription (Groq Whisper optional + Gemini 3.5 Transcribe + Gemini 4 Hydrogen / 3.1 Flash Lite fallback)
+  // 1. Voice Speech-to-Text Transcription via OpenRouter (google/gemini-2.5-flash-lite)
   app.post('/api/ai/transcribe', async (req, res) => {
     try {
-      const { audioBase64, mimeType = 'audio/webm', language = 'hi' } = req.body;
+      const { audioBase64, mimeType = 'audio/webm' } = req.body;
       if (!audioBase64) {
         res.status(400).json({ error: 'Missing audioBase64 payload' });
         return;
       }
 
-      const audioBuffer = Buffer.from(audioBase64, 'base64');
-
-      // Layer 1A: Try Groq Whisper-large-v3-turbo if GROQ_API_KEY is configured
-      const groqKey = getGroqKey();
-      if (groqKey) {
-        try {
-          const formData = new FormData();
-          const ext = mimeType.includes('mp4') ? 'm4a' : mimeType.includes('ogg') ? 'ogg' : 'webm';
-          const blob = new Blob([audioBuffer], { type: mimeType });
-          formData.append('file', blob, `voice.${ext}`);
-          formData.append('model', 'whisper-large-v3-turbo');
-          if (language) {
-            formData.append('language', language);
-          }
-          formData.append(
-            'prompt',
-            'Billing, Khata, Hindi, Hinglish, Rupees, kg, packet, udhar, nagad, jama, baki, GST, invoice, customer, supplier'
-          );
-
-          const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${groqKey}`,
-            },
-            body: formData,
-          });
-
-          if (groqRes.ok) {
-            const data = (await groqRes.json()) as { text?: string };
-            if (data.text && data.text.trim()) {
-              res.json({ transcript: data.text.trim(), engine: 'groq-whisper-large-v3-turbo' });
-              return;
-            }
-          }
-        } catch (groqErr) {
-          console.warn('Groq Whisper fallback to Gemini:', groqErr);
-        }
-      }
-
-      // Layer 1B: Gemini Audio Transcription with retry & model failover
-      const cleanMime = (mimeType.split(';')[0] || 'audio/webm').trim();
-      const { response: geminiResp, model } = await generateContentWithFallback(
-        ['gemini-3.5-transcribe', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
+      const audioFormat = getAudioFormatFromMime(String(mimeType));
+      const { content, model } = await callOpenRouterWithFallback(
+        MODELS.voiceTranscribe,
         (m) => ({
           model: m,
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: cleanMime,
-                  data: audioBase64,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Transcribe this Indian shopkeeper voice recording verbatim in Hinglish / Hindi / English. Preserve numbers, item names, quantities, rates, and party names. Do NOT add timestamps like 00:00. Return ONLY the transcription text.',
                 },
-              },
-              {
-                text: 'Transcribe this Indian shopkeeper voice recording accurately in Hinglish / Hindi / English exactly as spoken, preserving numbers, item names, quantities, rates, and party names. Return only the transcription text.',
-              },
-            ],
-          },
-        })
+                {
+                  type: 'input_audio',
+                  input_audio: {
+                    data: String(audioBase64),
+                    format: audioFormat,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+        15000
       );
 
       res.json({
-        transcript: (geminiResp.text ?? '').trim(),
+        transcript: content.replace(/^\d{1,2}:\d{2}\s*/, '').trim(),
         engine: model,
       });
     } catch (error) {
-      console.error('Transcription error:', error);
+      console.error('OpenRouter transcription error:', error);
       res.status(isApiKeyError(error) ? 401 : 500).json({
         error: error instanceof Error ? error.message : 'Audio transcription failed',
       });
     }
   });
 
-  // 2. Smart Voice / Text-to-Bill Parser (Groq optional + Gemini 4 Hydrogen -> Gemini 3.1 Flash Lite + smart normalizer)
+  // 2. Digital Bill Generation (Voice/Text -> Structured Bill JSON via google/gemini-2.5-flash-lite)
   app.post('/api/ai/parse-voice', async (req, res) => {
     try {
       const { transcript, txnType = 'Sale', existingParties = [], existingItems = [] } = req.body;
@@ -419,128 +541,63 @@ Convert the shopkeeper's Hindi/Hinglish/English billing command into a COMPLETE 
 Known parties: ${JSON.stringify(existingParties.slice(0, 30))}
 Known catalog items: ${JSON.stringify(existingItems.slice(0, 40))}
 
+Return ONLY a valid JSON object with exact keys:
+{
+  "partyName": string,
+  "phone": string,
+  "gstin": string,
+  "supplierBillNo": string,
+  "items": [{ "name": string, "qty": number, "unit": string, "rate": number, "total": number }],
+  "discount": number,
+  "deliveryCharge": number,
+  "gst": number,
+  "totalAmount": number,
+  "receivedAmount": number,
+  "balanceDue": number,
+  "paymentType": "Cash" | "Online" | "Credit",
+  "note": string,
+  "category": string
+}
+
 Strict Rules:
-- Always populate ALL fields. Never omit "items", "paymentType", "receivedAmount", or "balanceDue".
-- Extract partyName (default to "Cash Customer" for Sale or "Cash Supplier" for Purchase if not mentioned).
-- Extract phone (10 digits if mentioned, else "") and gstin (if mentioned, else "").
-- Extract items array: EVERY item mentioned must be included with { name (English/Hinglish), qty (number), unit (pcs, kg, bag, pkt, ltr, box), rate (unit price in INR), total (qty * rate) }.
+- Always populate ALL keys. Default phone/gstin/supplierBillNo to "" and discount/deliveryCharge/gst to 0.
+- Extract partyName (default "Cash Customer" for Sale or "Cash Supplier" for Purchase if not spoken).
+- Extract every item into items array with qty, unit (pcs/kg/bag/pkt/ltr/box), rate, total = qty * rate.
 - Example: "Ramesh ko 5 kg chini 45 rupaye kilo udhar diya" => partyName: "Ramesh", items: [{ name: "Chini", qty: 5, unit: "kg", rate: 45, total: 225 }], totalAmount: 225, receivedAmount: 0, balanceDue: 225, paymentType: "Credit".
 - For Payment In, Payment Out, or Expense, items can be [] and totalAmount = spoken amount.
 - If user says "udhar", "udhari", "baki", "credit", set receivedAmount = 0, balanceDue = totalAmount, paymentType = "Credit".
 - If user says "500 jama kiya" or partial payment, set receivedAmount = 500, balanceDue = totalAmount - 500.
 - Otherwise receivedAmount = totalAmount, balanceDue = 0, paymentType = "Cash" (or "Online" if UPI/GPay/PhonePe/Paytm/Online mentioned).`;
 
-      const groqKey = getGroqKey();
-      if (groqKey) {
-        try {
-          const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${groqKey}`,
-            },
-            body: JSON.stringify({
-              model: 'llama-3.3-70b-versatile',
-              response_format: { type: 'json_object' },
-              messages: [
-                { role: 'system', content: systemPrompt },
-                {
-                  role: 'user',
-                  content: `Transcript: "${transcript}"\nReturn JSON with exact keys: { "partyName": string, "phone": string, "gstin": string, "supplierBillNo": string, "items": [{ "name": string, "qty": number, "unit": string, "rate": number, "total": number }], "discount": number, "deliveryCharge": number, "gst": number, "totalAmount": number, "receivedAmount": number, "balanceDue": number, "paymentType": "Cash" | "Online" | "Credit", "note": string, "category": string }`,
-                },
-              ],
-            }),
-          });
-
-          if (groqRes.ok) {
-            const groqData = (await groqRes.json()) as {
-              choices?: Array<{ message?: { content?: string } }>;
-            };
-            const content = groqData.choices?.[0]?.message?.content;
-            if (content) {
-              const rawParsed = JSON.parse(extractJsonText(content)) as Record<string, unknown>;
-              res.json({
-                parsed: normalizeParsedBill(rawParsed, String(transcript), String(txnType)),
-                engine: 'llama-3.3-70b-versatile',
-              });
-              return;
-            }
-          }
-        } catch (groqErr) {
-          console.warn('Groq Llama parse fallback to Gemini:', groqErr);
-        }
-      }
-
       try {
-        const { response, model } = await generateContentWithFallback(
-          ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
+        const { content, model } = await callOpenRouterWithFallback(
+          MODELS.billGenerate,
           (m) => ({
             model: m,
-            contents: `Billing command: "${transcript}"`,
-            config: {
-              systemInstruction: systemPrompt,
-              thinkingConfig: {
-                thinkingLevel: m === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
-              },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                required: [
-                  'partyName',
-                  'items',
-                  'totalAmount',
-                  'receivedAmount',
-                  'balanceDue',
-                  'paymentType',
-                ],
-                properties: {
-                  partyName: { type: Type.STRING },
-                  phone: { type: Type.STRING },
-                  gstin: { type: Type.STRING },
-                  supplierBillNo: { type: Type.STRING },
-                  items: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      required: ['name', 'qty', 'unit', 'rate', 'total'],
-                      properties: {
-                        name: { type: Type.STRING },
-                        qty: { type: Type.NUMBER },
-                        unit: { type: Type.STRING },
-                        rate: { type: Type.NUMBER },
-                        total: { type: Type.NUMBER },
-                      },
-                    },
-                  },
-                  discount: { type: Type.NUMBER },
-                  deliveryCharge: { type: Type.NUMBER },
-                  gst: { type: Type.NUMBER },
-                  totalAmount: { type: Type.NUMBER },
-                  receivedAmount: { type: Type.NUMBER },
-                  balanceDue: { type: Type.NUMBER },
-                  paymentType: { type: Type.STRING },
-                  note: { type: Type.STRING },
-                  category: { type: Type.STRING },
-                },
-              },
-            },
-          })
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: `Billing command: "${transcript}"` },
+            ],
+          }),
+          12000
         );
 
-        const rawParsed = JSON.parse(extractJsonText(response.text)) as Record<string, unknown>;
+        const rawParsed = JSON.parse(extractJsonText(content)) as Record<string, unknown>;
         res.json({
           parsed: normalizeParsedBill(rawParsed, String(transcript), String(txnType)),
           engine: model,
         });
         return;
-      } catch (geminiErr) {
-        if (isApiKeyError(geminiErr)) {
+      } catch (openRouterErr) {
+        if (isApiKeyError(openRouterErr)) {
           res.status(401).json({
-            error: 'Invalid or missing Gemini API Key. Please check Settings > Secrets.',
+            error: 'Invalid or missing OpenRouter API Key. Please check .env / Secrets.',
           });
           return;
         }
-        console.warn('Gemini parse fallback to deterministic parser:', geminiErr);
+        console.warn('OpenRouter parse fallback to deterministic parser:', openRouterErr);
       }
 
       const fallback = fallbackParseTranscript(String(transcript), String(txnType));
@@ -553,7 +610,7 @@ Strict Rules:
     }
   });
 
-  // 3. AI Vision Paper Bill Scanner (Option 2: Scan with AI & Create Digital Bill)
+  // 3. AI Vision Paper Bill Scanner via OpenRouter (google/gemini-2.5-flash)
   app.post('/api/ai/scan-bill', async (req, res) => {
     try {
       const { imageBase64, mimeType = 'image/jpeg' } = req.body;
@@ -562,152 +619,72 @@ Strict Rules:
         return;
       }
 
-      const prompt = `Read this paper invoice/receipt image carefully and extract all billing details into JSON:
-- txnType ("Purchase Invoice" if this is a supplier tax invoice billed TO the buyer/shop, "Sale" if this is a customer receipt/bill, or "Expense")
-- partyName (for Purchase Invoice, extract the Supplier/Seller company name; for Sale, extract the Customer/Buyer name)
-- phone (phone number if visible, else "")
-- gstin (counterparty GSTIN if visible, else "")
-- supplierBillNo (invoice/bill number on the paper bill, else "")
-- items: array of line items [{ name, qty, unit, rate, total }]. Set "total" to the net pre-tax line amount (after any per-item % discount) and "rate" to total/qty or net unit rate.
-- discount (ONLY extra bill-level discount deducted AFTER item subtotal, default 0 — do NOT copy per-item % discounts here)
-- deliveryCharge (numeric delivery/freight charge in INR, default 0)
-- gst (combined GST percentage, e.g. CGST 9% + SGST 9% = 18, or IGST 18% = 18, or 0/5/12/18/28, default 0)
-- totalAmount (final printed Grand Total in INR)
-- receivedAmount (amount paid, default equal to totalAmount unless marked credit/due/unpaid)
-- balanceDue (balance unpaid, default 0)
-- paymentType ("Cash", "Online", or "Credit")
-- note (short summary note)`;
+      const prompt = `Read this paper invoice/receipt image carefully and extract all billing details into a single JSON object with these exact keys:
+{
+  "txnType": "Purchase Invoice" | "Sale" | "Expense",
+  "partyName": string,
+  "phone": string,
+  "gstin": string,
+  "supplierBillNo": string,
+  "items": [{ "name": string, "qty": number, "unit": string, "rate": number, "total": number }],
+  "discount": number,
+  "deliveryCharge": number,
+  "gst": number,
+  "totalAmount": number,
+  "receivedAmount": number,
+  "balanceDue": number,
+  "paymentType": "Cash" | "Online" | "Credit",
+  "note": string
+}
 
-      try {
-        const { response, model } = await generateContentWithFallback(
-          ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
-          (m) => ({
-            model: m,
-            contents: {
-              parts: [
-                {
-                  inlineData: {
-                    mimeType,
-                    data: imageBase64,
-                  },
-                },
-                { text: prompt },
+Rules:
+- txnType: Use "Purchase Invoice" if this is a supplier tax invoice billed TO a buyer/shop, "Sale" if this is a customer receipt/bill, or "Expense".
+- partyName: For Purchase Invoice, extract the Supplier/Seller company name at the top; for Sale, extract the Customer/Buyer name.
+- gstin: Counterparty GSTIN if visible, else "".
+- items: Extract every line item. Set "total" to the net pre-tax line amount (after any per-item % discount) and "rate" to total/qty or net unit rate.
+- discount: ONLY extra bill-level discount deducted AFTER item subtotal (default 0 — do NOT copy per-item % discounts here).
+- gst: Combined GST percentage as a number (e.g. CGST 9% + SGST 9% = 18, IGST 18% = 18, or 0/5/12/18/28).
+- totalAmount: Final printed Grand Total in INR (numeric).
+- paymentType: "Cash", "Online", or "Credit".`;
+
+      const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+      const { content, model } = await callOpenRouterWithFallback(
+        MODELS.billScan,
+        (m) => ({
+          model: m,
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: prompt },
+                { type: 'image_url', image_url: { url: dataUrl } },
               ],
             },
-            config: {
-              thinkingConfig: {
-                thinkingLevel: m === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
-              },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                required: ['partyName', 'txnType', 'items', 'totalAmount', 'paymentType'],
-                properties: {
-                  partyName: { type: Type.STRING },
-                  phone: { type: Type.STRING },
-                  gstin: { type: Type.STRING },
-                  supplierBillNo: { type: Type.STRING },
-                  txnType: { type: Type.STRING },
-                  items: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      required: ['name', 'qty', 'unit', 'rate', 'total'],
-                      properties: {
-                        name: { type: Type.STRING },
-                        qty: { type: Type.NUMBER },
-                        unit: { type: Type.STRING },
-                        rate: { type: Type.NUMBER },
-                        total: { type: Type.NUMBER },
-                      },
-                    },
-                  },
-                  discount: { type: Type.NUMBER },
-                  deliveryCharge: { type: Type.NUMBER },
-                  gst: { type: Type.NUMBER },
-                  totalAmount: { type: Type.NUMBER },
-                  receivedAmount: { type: Type.NUMBER },
-                  balanceDue: { type: Type.NUMBER },
-                  paymentType: { type: Type.STRING },
-                  note: { type: Type.STRING },
-                },
-              },
-            },
-          }),
-          { timeoutMs: 14000 }
-        );
-
-        const rawParsed = JSON.parse(extractJsonText(response.text)) as Record<string, unknown>;
-        const txn = String(rawParsed.txnType || 'Sale');
-        res.json({
-          parsed: {
-            ...normalizeParsedBill(rawParsed, '', txn),
-            txnType: txn,
-          },
-          engine: `${model}-vision`,
-        });
-        return;
-      } catch (visionErr) {
-        if (isApiKeyError(visionErr)) {
-          res.status(401).json({
-            error: 'Invalid or missing Gemini API Key. Please check Settings > Secrets.',
-          });
-          return;
-        }
-        console.warn('Gemini vision fallback to Groq vision:', visionErr);
-      }
-
-      const groqKey = getGroqKey();
-      if (groqKey) {
-        const groqVisionRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${groqKey}`,
-          },
-          body: JSON.stringify({
-            model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-            response_format: { type: 'json_object' },
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  { type: 'text', text: prompt },
-                  {
-                    type: 'image_url',
-                    image_url: { url: `data:${mimeType};base64,${imageBase64}` },
-                  },
-                ],
-              },
-            ],
-          }),
-        });
-
-        if (groqVisionRes.ok) {
-          const data = (await groqVisionRes.json()) as {
-            choices?: Array<{ message?: { content?: string } }>;
-          };
-          const content = data.choices?.[0]?.message?.content;
-          if (content) {
-            const rawParsed = JSON.parse(extractJsonText(content)) as Record<string, unknown>;
-            res.json({ parsed: rawParsed, engine: 'groq-vision' });
-            return;
-          }
-        }
-      }
-
-      throw new Error(
-        'Could not extract bill fields from image. Please check image clarity or save as Normal Bill Photo.'
+          ],
+        }),
+        18000
       );
+
+      const rawParsed = JSON.parse(extractJsonText(content)) as Record<string, unknown>;
+      const txn = String(rawParsed.txnType || 'Sale');
+      res.json({
+        parsed: {
+          ...normalizeParsedBill(rawParsed, '', txn),
+          txnType: txn,
+        },
+        engine: `${model}-vision`,
+      });
     } catch (error) {
       console.error('AI Bill Scan Error:', error);
-      res.status(500).json({
+      res.status(isApiKeyError(error) ? 401 : 500).json({
         error: error instanceof Error ? error.message : 'Failed to scan bill with AI',
       });
     }
   });
 
-  // 4. Smart Voice / Text-to-Item Parser for Inventory Catalog
+  // 4. Smart Inventory Item Parser via OpenRouter (google/gemini-2.5-flash-lite)
   app.post('/api/ai/parse-item', async (req, res) => {
     try {
       const { transcript } = req.body;
@@ -716,86 +693,39 @@ Strict Rules:
         return;
       }
 
-      const groqKey = getGroqKey();
-      if (groqKey) {
-        try {
-          const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${groqKey}`,
-            },
-            body: JSON.stringify({
-              model: 'llama-3.3-70b-versatile',
-              response_format: { type: 'json_object' },
-              messages: [
-                {
-                  role: 'system',
-                  content:
-                    'Extract product inventory item details from Hindi/Hinglish speech into JSON: { "name": string, "unit": string (pcs/kg/bag/pkt/ltr/box), "salePrice": number, "purchasePrice": number, "stockQty": number, "gstPercent": number, "hsn": string, "barcode": string }.',
-                },
-                { role: 'user', content: String(transcript) },
-              ],
-            }),
-          });
-
-          if (groqRes.ok) {
-            const data = (await groqRes.json()) as {
-              choices?: Array<{ message?: { content?: string } }>;
-            };
-            const content = data.choices?.[0]?.message?.content;
-            if (content) {
-              res.json({ parsed: JSON.parse(extractJsonText(content)), engine: 'llama-3.3-70b-versatile' });
-              return;
-            }
-          }
-        } catch (e) {
-          console.warn('Groq item parse fallback:', e);
-        }
-      }
-
       try {
-        const { response, model } = await generateContentWithFallback(
-          ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
+        const { content, model } = await callOpenRouterWithFallback(
+          MODELS.billGenerate,
           (m) => ({
             model: m,
-            contents: `Extract product inventory item details from Hindi/Hinglish text: "${transcript}"`,
-            config: {
-              systemInstruction:
-                'Extract product inventory fields cleanly. For example "Chini 1 kg sale 48 purchase 42 stock 50" => { name: "Chini", unit: "kg", salePrice: 48, purchasePrice: 42, stockQty: 50, gstPercent: 0, hsn: "", barcode: "" }.',
-              thinkingConfig: {
-                thinkingLevel: m === 'gemini-3.1-flash-lite' ? ThinkingLevel.MINIMAL : ThinkingLevel.LOW,
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'Extract product inventory item details from Hindi/Hinglish text into JSON: { "name": string, "unit": string (pcs/kg/bag/pkt/ltr/box), "salePrice": number, "purchasePrice": number, "stockQty": number, "gstPercent": number, "hsn": string, "barcode": string }.',
               },
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: Type.OBJECT,
-                required: ['name', 'unit', 'salePrice', 'purchasePrice', 'stockQty', 'gstPercent'],
-                properties: {
-                  name: { type: Type.STRING },
-                  unit: { type: Type.STRING },
-                  salePrice: { type: Type.NUMBER },
-                  purchasePrice: { type: Type.NUMBER },
-                  stockQty: { type: Type.NUMBER },
-                  gstPercent: { type: Type.NUMBER },
-                  hsn: { type: Type.STRING },
-                  barcode: { type: Type.STRING },
-                },
+              {
+                role: 'user',
+                content: `Item text: "${transcript}"`,
               },
-            },
-          })
+            ],
+          }),
+          10000
         );
 
-        const parsed = JSON.parse(extractJsonText(response.text));
+        const parsed = JSON.parse(extractJsonText(content));
         res.json({ parsed, engine: model });
         return;
-      } catch (geminiErr) {
-        if (isApiKeyError(geminiErr)) {
+      } catch (openRouterErr) {
+        if (isApiKeyError(openRouterErr)) {
           res.status(401).json({
-            error: 'Invalid or missing Gemini API Key. Please check Settings > Secrets.',
+            error: 'Invalid or missing OpenRouter API Key. Please check .env / Secrets.',
           });
           return;
         }
-        console.warn('Gemini item parse fallback to deterministic parser:', geminiErr);
+        console.warn('OpenRouter item parse fallback to deterministic parser:', openRouterErr);
       }
 
       res.json({ parsed: fallbackParseItem(String(transcript)), engine: 'smart-local-parser' });
@@ -806,116 +736,39 @@ Strict Rules:
     }
   });
 
-  // 5. Text-to-Speech (TTS) with multi-strategy Gemini 3.8 TTS & v1beta/v1alpha compatibility
+  // 5. Voice Text-to-Speech via OpenRouter (openai/gpt-audio-mini streaming PCM16 -> WAV)
   app.post('/api/ai/tts', async (req, res) => {
     try {
-      const { text, voiceName = 'Kore', style } = req.body;
+      const { text, voiceName = 'alloy', style } = req.body;
       const cleanText = String(text || '').trim().slice(0, 1200);
       if (!cleanText) {
         res.status(400).json({ error: 'Text is required for speech generation' });
         return;
       }
 
+      const validVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'];
+      const mappedVoice = validVoices.includes(String(voiceName).toLowerCase())
+        ? String(voiceName).toLowerCase()
+        : 'alloy';
       const stylePrompt =
         String(style || '').trim() ||
-        'Clear, warm, polite Indian shopkeeper assistant speaking Hinglish and Hindi numbers naturally';
+        'Speak in a clear, warm, polite Indian shopkeeper assistant voice with natural Hinglish and Hindi numbers';
 
-      const strategies: Array<{
-        label: string;
-        apiVersion?: string;
-        model: string;
-        withSpeechMetadata: boolean;
-        withSpeechConfig: boolean;
-      }> = [
-        {
-          label: 'v1beta-3.8-lite-full',
-          apiVersion: 'v1beta',
-          model: 'gemini-3.8-flash-lite-tts',
-          withSpeechMetadata: true,
-          withSpeechConfig: true,
-        },
-        {
-          label: 'v1alpha-3.8-lite-full',
-          apiVersion: 'v1alpha',
-          model: 'gemini-3.8-flash-lite-tts',
-          withSpeechMetadata: true,
-          withSpeechConfig: true,
-        },
-        {
-          label: 'v1beta-3.8-lite-basic-speechConfig',
-          apiVersion: 'v1beta',
-          model: 'gemini-3.8-flash-lite-tts',
-          withSpeechMetadata: false,
-          withSpeechConfig: true,
-        },
-        {
-          label: 'v1beta-2.5-preview-tts',
-          apiVersion: 'v1beta',
-          model: 'gemini-2.5-flash-preview-tts',
-          withSpeechMetadata: false,
-          withSpeechConfig: true,
-        },
-        {
-          label: 'default-3.8-lite-audio-only',
-          model: 'gemini-3.8-flash-lite-tts',
-          withSpeechMetadata: false,
-          withSpeechConfig: false,
-        },
-      ];
+      const { audioBase64, mimeType, model } = await callOpenRouterTtsStream(
+        MODELS.voiceTts,
+        cleanText,
+        mappedVoice,
+        stylePrompt,
+        15000
+      );
 
-      let lastErr: unknown;
-      for (const strat of strategies) {
-        try {
-          const ai = getGeminiClient(strat.apiVersion);
-          const part: Record<string, unknown> = {
-            text: strat.withSpeechMetadata ? cleanText : `Speak clearly in natural Hinglish: ${cleanText}`,
-          };
-          if (strat.withSpeechMetadata) {
-            part.speechMetadata = { style: stylePrompt };
-          }
-          const config: Record<string, unknown> = {
-            responseModalities: ['AUDIO'],
-          };
-          if (strat.withSpeechConfig) {
-            config.speechConfig = {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: String(voiceName || 'Kore'),
-                },
-              },
-            };
-          }
-
-          const response = await withTimeout(
-            ai.models.generateContent({
-              model: strat.model,
-              contents: [{ role: 'user', parts: [part as never] }],
-              config: config as never,
-            }),
-            10000
-          );
-
-          const inlineData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-          const base64Audio = inlineData?.data;
-          if (base64Audio) {
-            res.json({
-              audioBase64: base64Audio,
-              mimeType: inlineData?.mimeType || 'audio/wav',
-              engine: `${strat.model} (${strat.label})`,
-            });
-            return;
-          }
-        } catch (err) {
-          lastErr = err;
-          if (isApiKeyError(err)) {
-            throw err;
-          }
-        }
-      }
-
-      throw lastErr instanceof Error ? lastErr : new Error('TTS model returned no audio');
+      res.json({
+        audioBase64,
+        mimeType,
+        engine: model,
+      });
     } catch (error) {
-      console.error('TTS error:', error);
+      console.error('OpenRouter TTS error:', error);
       res.status(isApiKeyError(error) ? 401 : 500).json({
         error: error instanceof Error ? error.message : 'Text-to-speech generation failed',
       });
@@ -937,7 +790,7 @@ Strict Rules:
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`CM Voice Khata server running on http://localhost:${PORT}`);
+    console.log(`CM Voice Khata server running on http://localhost:${PORT} (OpenRouter AI)`);
   });
 }
 

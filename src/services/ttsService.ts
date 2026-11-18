@@ -114,7 +114,7 @@ export async function speakText(
       }
     });
 
-    return { engine: data.engine || 'gemini-3.8-flash-lite-tts' };
+    return { engine: data.engine || 'openai/gpt-audio-mini' };
   } catch {
     await speakWithBrowserFallback(cleanText);
     options?.onEnd?.();

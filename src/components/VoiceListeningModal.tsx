@@ -154,7 +154,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
           setLiveTranscript(text.trim());
         };
         rec.onerror = () => {
-          // Audio MediaRecorder fallback will handle Groq Whisper / Gemini Audio transcription
+          // Audio MediaRecorder fallback will handle OpenRouter Audio transcription
         };
         rec.start();
         recognitionRef.current = rec;
