@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Package,
   UserPlus,
+  Volume2,
 } from 'lucide-react';
 import {
   ALL_TRANSACTION_TYPES,
@@ -22,6 +23,7 @@ import {
   VoiceParsedBillPayload,
 } from '../types';
 import { uploadToCloudinary } from '../services/cloudinary';
+import { speakText, stopSpeaking } from '../services/ttsService';
 
 interface CreateBillPickerSheetProps {
   isOpen: boolean;
@@ -190,6 +192,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const isPaymentOrExpense =
     txnType === 'Payment In' || txnType === 'Payment Out' || txnType === 'Expense';
@@ -409,6 +412,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
 
   const handleAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     setUploadingAttachment(true);
     setErrorMsg('');
@@ -419,6 +423,37 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
       setErrorMsg(err instanceof Error ? err.message : 'Attachment upload failed');
     } finally {
       setUploadingAttachment(false);
+    }
+  };
+
+  const handleToggleSpeakBill = async () => {
+    if (isSpeaking) {
+      stopSpeaking();
+      setIsSpeaking(false);
+      return;
+    }
+    const party =
+      partyName.trim() ||
+      (txnType === 'Expense' ? category || 'Shop Expense' : 'Cash Customer');
+    const itemsDesc = !isPaymentOrExpense
+      ? items
+          .filter((i) => i.name.trim())
+          .slice(0, 4)
+          .map((i) => `${i.qty} ${i.unit} ${i.name}`)
+          .join(', ')
+      : '';
+    const dueMsg =
+      totals.balanceDue > 0
+        ? `Balance due ${totals.balanceDue} rupaye.`
+        : `${paymentMode} payment settled.`;
+    const summary = `${txnType} bill for ${party}. ${
+      itemsDesc ? `Items: ${itemsDesc}. ` : ''
+    }Total ${totals.totalAmount} rupaye. ${dueMsg}`;
+    setIsSpeaking(true);
+    try {
+      await speakText(summary, { onEnd: () => setIsSpeaking(false) });
+    } finally {
+      setIsSpeaking(false);
     }
   };
 
@@ -479,20 +514,16 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
 
   return (
     <div className="fixed inset-0 z-40 bg-[#FBF9F1] flex flex-col overflow-hidden">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*,application/pdf"
-        onChange={handleAttachmentUpload}
-        className="hidden"
-      />
-
       {/* Top App Bar */}
-      <div className="bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between shrink-0">
+      <div className="bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between shrink-0 gap-2">
         <div className="flex items-center gap-3 min-w-0">
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => {
+              stopSpeaking();
+              setIsSpeaking(false);
+              onClose();
+            }}
             className="w-9 h-9 rounded-full bg-[#FBF9F1] flex items-center justify-center text-slate-700"
             aria-label="Close form"
           >
@@ -519,15 +550,35 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
           </div>
         </div>
 
-        {/* Embedded Voice Trigger */}
-        <button
-          type="button"
-          onClick={() => onOpenVoiceMic(txnType)}
-          className="px-3.5 py-2 rounded-full voice-orb-glow text-white text-xs font-bold flex items-center gap-1.5 shrink-0 active:scale-95 transition"
-        >
-          <Mic className="w-3.5 h-3.5" />
-          <span>Voice Fill</span>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleToggleSpeakBill}
+            className={`px-3 py-2 rounded-full text-xs font-bold flex items-center gap-1 active:scale-95 transition ${
+              isSpeaking
+                ? 'bg-rose-100 text-rose-700'
+                : 'bg-emerald-50 text-[#1B9B62] border border-[#1B9B62]/20'
+            }`}
+            title="Listen to bill details (Text-to-Speech)"
+          >
+            <Volume2 className="w-3.5 h-3.5" />
+            <span>{isSpeaking ? 'Stop' : 'सुनें'}</span>
+          </button>
+
+          {/* Embedded Voice Trigger */}
+          <button
+            type="button"
+            onClick={() => {
+              stopSpeaking();
+              setIsSpeaking(false);
+              onOpenVoiceMic(txnType);
+            }}
+            className="px-3.5 py-2 rounded-full voice-orb-glow text-white text-xs font-bold flex items-center gap-1.5 shrink-0 active:scale-95 transition"
+          >
+            <Mic className="w-3.5 h-3.5" />
+            <span>Voice Fill</span>
+          </button>
+        </div>
       </div>
 
       {/* Scrollable Receipt Form */}
@@ -945,12 +996,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
               {/* Attachment / Normal Bill Photo */}
               <div className="pt-2 border-t border-dashed border-slate-200">
                 <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    disabled={uploadingAttachment}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex-1 py-2.5 px-3 rounded-xl bg-[#FBF9F1] border border-slate-200 text-xs font-bold text-slate-700 flex items-center justify-center gap-2 hover:bg-slate-100"
-                  >
+                  <label className="relative overflow-hidden flex-1 py-2.5 px-3 rounded-xl bg-[#FBF9F1] border border-slate-200 text-xs font-bold text-slate-700 flex items-center justify-center gap-2 hover:bg-slate-100 cursor-pointer">
                     {uploadingAttachment ? (
                       <Loader2 className="w-4 h-4 animate-spin text-[#6A4CFF]" />
                     ) : (
@@ -959,9 +1005,17 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
                     <span>
                       {attachmentUrl
                         ? 'Change Bill Photo Attachment'
-                        : '📎 Add attachment / Normal Bill Photo'}
+                        : 'Add attachment / Normal Bill Photo'}
                     </span>
-                  </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*,application/pdf"
+                      disabled={uploadingAttachment}
+                      onChange={handleAttachmentUpload}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </label>
                   {attachmentUrl && (
                     <a
                       href={attachmentUrl}

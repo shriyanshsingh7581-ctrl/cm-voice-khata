@@ -83,6 +83,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     setUploadingLogo(true);
     try {
@@ -188,14 +189,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (section === 'profile') {
     return (
       <div className="space-y-4 pb-28">
-        <input
-          ref={logoInputRef}
-          type="file"
-          accept="image/*"
-          onChange={handleLogoUpload}
-          className="hidden"
-        />
-
         <div className="flex items-center justify-between">
           <button
             onClick={() => setSection('menu')}
@@ -210,11 +203,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
         {/* Logo & Completion Card */}
         <div className="bg-white rounded-3xl p-5 border border-slate-200/80 flex items-center gap-4">
-          <button
-            type="button"
-            onClick={() => logoInputRef.current?.click()}
-            className="relative w-20 h-20 rounded-2xl bg-[#FBF9F1] border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden shrink-0"
-          >
+          <label className="relative w-20 h-20 rounded-2xl bg-[#FBF9F1] border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden shrink-0 cursor-pointer">
             <img
               src={profileForm.logoUrl || CM_LOGO_PATH}
               alt="Business Logo"
@@ -228,7 +217,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               )}
               + Logo
             </div>
-          </button>
+            <input
+              ref={logoInputRef}
+              type="file"
+              accept="image/*"
+              disabled={uploadingLogo}
+              onChange={handleLogoUpload}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+          </label>
 
           <div className="flex-1 min-w-0">
             <h2 className="font-extrabold text-base text-slate-900 truncate">

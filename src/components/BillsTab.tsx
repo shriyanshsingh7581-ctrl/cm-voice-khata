@@ -13,6 +13,7 @@ import {
   ZoomIn,
   X,
   Download,
+  Volume2,
 } from 'lucide-react';
 import {
   ALL_TRANSACTION_TYPES,
@@ -31,6 +32,7 @@ import {
   formatINR,
   getWhatsAppShareUrl,
 } from '../services/exportService';
+import { buildBillSpeech, speakText, stopSpeaking } from '../services/ttsService';
 
 interface BillsTabProps {
   bills: Bill[];
@@ -66,6 +68,23 @@ export const BillsTab: React.FC<BillsTabProps> = ({
   const [toDate, setToDate] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [selectedBillDetail, setSelectedBillDetail] = useState<Bill | null>(null);
+  const [speakingBillId, setSpeakingBillId] = useState<string | null>(null);
+
+  const handleToggleSpeakBill = async (bill: Bill) => {
+    if (speakingBillId === bill.id) {
+      stopSpeaking();
+      setSpeakingBillId(null);
+      return;
+    }
+    setSpeakingBillId(bill.id);
+    try {
+      await speakText(buildBillSpeech(bill), {
+        onEnd: () => setSpeakingBillId(null),
+      });
+    } finally {
+      setSpeakingBillId(null);
+    }
+  };
 
   const filteredBills = useMemo(() => {
     if (filterKind === 'photos') return [];
@@ -359,6 +378,17 @@ export const BillsTab: React.FC<BillsTabProps> = ({
                     >
                       <Printer className="w-3.5 h-3.5" />
                       Print
+                    </button>
+                    <button
+                      onClick={() => handleToggleSpeakBill(bill)}
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 ${
+                        speakingBillId === bill.id
+                          ? 'bg-rose-100 text-rose-700'
+                          : 'bg-purple-50 text-[#6A4CFF]'
+                      }`}
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                      {speakingBillId === bill.id ? 'Stop' : 'सुनें'}
                     </button>
                   </div>
                   <div className="flex items-center gap-1">

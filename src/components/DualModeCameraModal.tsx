@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Camera,
   X,
@@ -9,6 +9,7 @@ import {
   ScanBarcode,
   Check,
   RefreshCw,
+  SwitchCamera,
 } from 'lucide-react';
 import { Party, VoiceParsedBillPayload } from '../types';
 import { fileToBase64, uploadToCloudinary } from '../services/cloudinary';
@@ -42,10 +43,10 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
-  const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   const [cameraActive, setCameraActive] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [cameraError, setCameraError] = useState('');
   const [capturedDataUrl, setCapturedDataUrl] = useState('');
   const [capturedBase64, setCapturedBase64] = useState('');
@@ -66,33 +67,78 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
   const [statusError, setStatusError] = useState('');
   const [manualBarcode, setManualBarcode] = useState('');
 
-  const stopCamera = () => {
+  const stopCamera = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
-    setCameraActive(false);
-  };
-
-  const startCamera = async () => {
-    setCameraError('');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
-      });
-      streamRef.current = stream;
-      setCameraActive(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
-    } catch {
-      setCameraActive(false);
-      setCameraError(
-        'Live viewfinder is unavailable in this environment. Use "Open Phone Camera" or "Upload from Gallery" below.'
-      );
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
-  };
+    setCameraActive(false);
+  }, []);
+
+  const attachStreamToVideo = useCallback(async () => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!video || !stream) return;
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+    try {
+      await video.play();
+    } catch {
+      // autoplay might require muted/playsInline which are already set
+    }
+  }, []);
+
+  const startCamera = useCallback(
+    async (preferredFacing: 'environment' | 'user' = facingMode) => {
+      stopCamera();
+      setCameraError('');
+      setCameraLoading(true);
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraLoading(false);
+        setCameraError(
+          'Live camera preview is not supported in this browser. Use "Open Phone Camera" or "Upload from Gallery" below.'
+        );
+        return;
+      }
+
+      try {
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: preferredFacing } },
+            audio: false,
+          });
+        } catch {
+          // Fallback to any available video device
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+
+        streamRef.current = stream;
+        setCameraActive(true);
+        await attachStreamToVideo();
+      } catch (err) {
+        setCameraActive(false);
+        const msg = err instanceof Error ? err.name : '';
+        if (msg === 'NotAllowedError' || msg === 'PermissionDeniedError') {
+          setCameraError(
+            'Camera permission denied. Allow camera access or use "Open Phone Camera" / "Upload from Gallery" below.'
+          );
+        } else {
+          setCameraError(
+            'Live viewfinder unavailable here. Tap "Open Phone Camera" or "Upload from Gallery" below to pick a bill photo.'
+          );
+        }
+      } finally {
+        setCameraLoading(false);
+      }
+    },
+    [attachStreamToVideo, facingMode, stopCamera]
+  );
 
   useEffect(() => {
     if (isOpen) {
@@ -102,13 +148,20 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
       setSelectedAction('choice');
       setStatusError('');
       setManualBarcode('');
-      startCamera();
+      startCamera(facingMode);
     } else {
       stopCamera();
     }
     return () => stopCamera();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  // Ensure stream is bound to <video> whenever cameraActive or DOM updates
+  useEffect(() => {
+    if (isOpen && cameraActive && !capturedDataUrl) {
+      attachStreamToVideo();
+    }
+  }, [isOpen, cameraActive, capturedDataUrl, attachStreamToVideo]);
 
   // Live BarcodeDetector loop when in barcode mode
   useEffect(() => {
@@ -143,14 +196,16 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
       active = false;
       window.clearInterval(timer);
     };
-  }, [isOpen, mode, cameraActive, onBarcodeDetected, onClose]);
+  }, [isOpen, mode, cameraActive, onBarcodeDetected, onClose, stopCamera]);
 
   const handleCaptureFrame = () => {
     if (!videoRef.current) return;
     const video = videoRef.current;
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -172,10 +227,45 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
 
   const handleFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Reset input value so picking the same/another file always triggers onChange
+    e.target.value = '';
     if (!file) return;
     setStatusError('');
     try {
       const { base64, dataUrl, mimeType } = await fileToBase64(file);
+      if (mode === 'barcode') {
+        // Try BarcodeDetector on picked image if supported
+        const win = window as unknown as {
+          BarcodeDetector?: new (opts?: { formats: string[] }) => {
+            detect: (src: HTMLImageElement) => Promise<Array<{ rawValue: string }>>;
+          };
+        };
+        if (win.BarcodeDetector) {
+          const img = new Image();
+          img.src = dataUrl;
+          await new Promise((res) => {
+            img.onload = res;
+            img.onerror = res;
+          });
+          try {
+            const detector = new win.BarcodeDetector({
+              formats: ['ean_13', 'ean_8', 'upc_a', 'code_128', 'qr_code'],
+            });
+            const codes = await detector.detect(img);
+            if (codes.length > 0 && codes[0].rawValue) {
+              stopCamera();
+              onBarcodeDetected?.(codes[0].rawValue);
+              onClose();
+              return;
+            }
+          } catch {
+            // fallback to manual input message
+          }
+        }
+        setCameraError('Barcode could not be auto-read from image. Please enter the code below.');
+        return;
+      }
+
       setCapturedDataUrl(dataUrl);
       setCapturedBase64(base64);
       setCapturedMimeType(mimeType);
@@ -184,6 +274,12 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     } catch {
       setStatusError('Could not read the selected image.');
     }
+  };
+
+  const handleSwitchCamera = () => {
+    const next = facingMode === 'environment' ? 'user' : 'environment';
+    setFacingMode(next);
+    startCamera(next);
   };
 
   const handleSaveNormalPhoto = async (e: React.FormEvent) => {
@@ -218,7 +314,6 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     setIsScanningAI(true);
     setStatusError('');
     try {
-      // Run Cloudinary upload + AI Vision extraction in parallel
       const [cloudinaryUrl, aiRes] = await Promise.all([
         uploadToCloudinary(capturedFile || capturedDataUrl),
         fetch('/api/ai/scan-bill', {
@@ -254,23 +349,6 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col justify-between overflow-y-auto">
-      {/* Hidden Android WebView-compatible Native Camera & Gallery Inputs */}
-      <input
-        ref={nativeCameraInputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        onChange={handleFilePicked}
-        className="hidden"
-      />
-      <input
-        ref={galleryInputRef}
-        type="file"
-        accept="image/*"
-        onChange={handleFilePicked}
-        className="hidden"
-      />
-
       {/* Top Bar */}
       <div className="flex items-center justify-between px-4 py-3.5 bg-slate-900/90 border-b border-white/10 sticky top-0 z-10">
         <div className="flex items-center gap-2.5">
@@ -287,16 +365,30 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
               : 'Scan or Capture Bill Photo'}
           </span>
         </div>
-        <button
-          onClick={() => {
-            stopCamera();
-            onClose();
-          }}
-          className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/20"
-          aria-label="Close camera"
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          {!capturedDataUrl && cameraActive && (
+            <button
+              type="button"
+              onClick={handleSwitchCamera}
+              className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/20"
+              aria-label="Switch camera"
+              title="Switch Camera"
+            >
+              <SwitchCamera className="w-4 h-4" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              stopCamera();
+              onClose();
+            }}
+            className="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/20"
+            aria-label="Close camera"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {/* Main Content */}
@@ -304,21 +396,53 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         {mode === 'barcode' ? (
           <div className="w-full space-y-4">
             <div className="relative rounded-3xl overflow-hidden bg-black aspect-[4/3] border border-white/15 flex items-center justify-center">
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                autoPlay
+                className={cameraActive ? 'w-full h-full object-cover' : 'hidden'}
+              />
               {cameraActive ? (
-                <>
-                  <video
-                    ref={videoRef}
-                    playsInline
-                    muted
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute inset-8 border-2 border-[#34D399] rounded-2xl pointer-events-none" />
-                </>
+                <div className="absolute inset-8 border-2 border-[#34D399] rounded-2xl pointer-events-none" />
               ) : (
-                <div className="p-6 text-center text-sm text-slate-300">
-                  {cameraError || 'Starting barcode scanner...'}
+                <div className="p-6 text-center text-sm text-slate-300 space-y-3">
+                  <p>{cameraLoading ? 'Starting barcode camera...' : cameraError || 'Starting barcode scanner...'}</p>
+                  {!cameraLoading && (
+                    <button
+                      type="button"
+                      onClick={() => startCamera(facingMode)}
+                      className="px-4 py-2 rounded-xl bg-white/15 text-xs font-bold text-white inline-flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" /> Retry Camera
+                    </button>
+                  )}
                 </div>
               )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              <label className="relative overflow-hidden py-3 px-3 rounded-2xl bg-[#1B9B62] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition">
+                <Camera className="w-4 h-4" />
+                <span>Phone Camera</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleFilePicked}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
+              </label>
+              <label className="relative overflow-hidden py-3 px-3 rounded-2xl bg-white/10 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer hover:bg-white/20 active:scale-95 transition">
+                <Upload className="w-4 h-4" />
+                <span>From Gallery</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleFilePicked}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
+              </label>
             </div>
 
             <div className="bg-slate-900 rounded-2xl p-4 border border-white/10">
@@ -349,31 +473,54 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
             </div>
           </div>
         ) : !capturedDataUrl ? (
-          /* Camera Viewfinder + Mandatory APK Native Fallbacks */
+          /* Camera Viewfinder + Bulletproof Android WebView Native Camera & Gallery Labels */
           <div className="w-full space-y-4">
-            <div className="relative rounded-3xl overflow-hidden bg-slate-900 aspect-[3/4] max-h-[58vh] border border-white/15 flex items-center justify-center">
-              {cameraActive ? (
-                <video
-                  ref={videoRef}
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover"
-                />
-              ) : (
+            <div className="relative rounded-3xl overflow-hidden bg-slate-900 aspect-[3/4] max-h-[54vh] border border-white/15 flex items-center justify-center">
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                autoPlay
+                className={cameraActive ? 'w-full h-full object-cover' : 'hidden'}
+              />
+              {!cameraActive && (
                 <div className="p-6 text-center space-y-3">
-                  <Camera className="w-12 h-12 text-slate-500 mx-auto" />
-                  <p className="text-xs text-slate-300 max-w-xs mx-auto">
-                    {cameraError || 'Camera preview inactive. Use the native camera button below.'}
+                  {cameraLoading ? (
+                    <Loader2 className="w-10 h-10 text-[#A78BFA] mx-auto animate-spin" />
+                  ) : (
+                    <Camera className="w-12 h-12 text-slate-500 mx-auto" />
+                  )}
+                  <p className="text-xs text-slate-300 max-w-xs mx-auto leading-relaxed">
+                    {cameraLoading
+                      ? 'Opening live camera...'
+                      : cameraError || 'Camera preview inactive. Tap "Open Phone Camera" or "Upload from Gallery" below.'}
                   </p>
+                  {!cameraLoading && (
+                    <button
+                      type="button"
+                      onClick={() => startCamera(facingMode)}
+                      className="px-4 py-2 rounded-xl bg-white/15 hover:bg-white/20 text-xs font-bold text-white inline-flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Retry Live Camera
+                    </button>
+                  )}
                 </div>
               )}
             </div>
 
+            {statusError && (
+              <div className="p-3 rounded-2xl bg-rose-500/20 border border-rose-400/30 text-rose-200 text-xs">
+                {statusError}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 gap-2.5">
               {cameraActive && (
                 <button
+                  type="button"
                   onClick={handleCaptureFrame}
-                  className="w-full py-3.5 rounded-2xl bg-[#6A4CFF] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg"
+                  className="w-full py-3.5 rounded-2xl bg-[#6A4CFF] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg active:scale-95 transition"
                 >
                   <Camera className="w-5 h-5" />
                   Capture Bill Photo
@@ -381,22 +528,30 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
               )}
 
               <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => nativeCameraInputRef.current?.click()}
-                  className="py-3 px-3 rounded-2xl bg-[#1B9B62] text-white font-bold text-xs flex items-center justify-center gap-1.5"
-                >
-                  <Camera className="w-4 h-4" />
-                  Open Phone Camera
-                </button>
-                <button
-                  type="button"
-                  onClick={() => galleryInputRef.current?.click()}
-                  className="py-3 px-3 rounded-2xl bg-white/10 text-white font-bold text-xs flex items-center justify-center gap-1.5 hover:bg-white/20"
-                >
-                  <Upload className="w-4 h-4" />
-                  Upload from Gallery
-                </button>
+                {/* Direct Native Camera Label (No JS .click() needed — works inside Android WebView & iOS) */}
+                <label className="relative overflow-hidden py-3.5 px-3 rounded-2xl bg-[#1B9B62] hover:bg-[#168452] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition shadow-md">
+                  <Camera className="w-4 h-4 shrink-0" />
+                  <span>Open Phone Camera</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleFilePicked}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                </label>
+
+                {/* Direct Native Gallery / File Picker Label */}
+                <label className="relative overflow-hidden py-3.5 px-3 rounded-2xl bg-white/15 hover:bg-white/25 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition">
+                  <Upload className="w-4 h-4 shrink-0" />
+                  <span>Upload from Gallery</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFilePicked}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                </label>
               </div>
             </div>
           </div>
@@ -410,10 +565,12 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
                 className="max-h-[42vh] w-auto object-contain"
               />
               <button
+                type="button"
                 onClick={() => {
                   setCapturedDataUrl('');
                   setCapturedBase64('');
-                  startCamera();
+                  setCapturedFile(null);
+                  startCamera(facingMode);
                 }}
                 className="absolute top-3 right-3 px-3 py-1.5 rounded-xl bg-black/70 text-white text-xs font-semibold flex items-center gap-1.5"
               >
@@ -441,7 +598,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
                 </div>
                 <div>
                   <div className="font-extrabold text-sm">
-                    📸 Save Normal Bill Photo Only
+                    Save Normal Bill Photo Only
                   </div>
                   <div className="text-xs text-emerald-100 mt-0.5">
                     सीधा बिल फोटो सेव करें (Without AI scanning — quick photo record)
@@ -467,7 +624,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
                   <div className="font-extrabold text-sm">
                     {isScanningAI
                       ? 'Scanning Bill with AI...'
-                      : '✨ Scan with AI & Create Digital Bill'}
+                      : 'Scan with AI & Create Digital Bill'}
                   </div>
                   <div className="text-xs text-purple-100 mt-0.5">
                     AI से बिल बनाएं (Auto-extract Party, Items, Rates &amp; GST)

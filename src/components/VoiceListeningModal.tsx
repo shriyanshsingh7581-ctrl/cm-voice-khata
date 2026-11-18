@@ -1,7 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, Square, X, Check, Sparkles, Loader2, Volume2, Edit3 } from 'lucide-react';
+import {
+  Mic,
+  Square,
+  X,
+  Check,
+  Sparkles,
+  Loader2,
+  Volume2,
+  VolumeX,
+  Edit3,
+} from 'lucide-react';
 import { TransactionType, VoiceParsedBillPayload, Party, CatalogItem } from '../types';
 import { fileToBase64 } from '../services/cloudinary';
+import { buildParsedPreviewSpeech, speakText, stopSpeaking } from '../services/ttsService';
 
 interface VoiceListeningModalProps {
   isOpen: boolean;
@@ -46,6 +57,8 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [bars, setBars] = useState<number[]>(Array(16).fill(12));
   const [parsedPreview, setParsedPreview] = useState<VoiceParsedBillPayload | null>(null);
+  const [autoSpeak, setAutoSpeak] = useState(true);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -82,18 +95,41 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
       setLiveTranscript('');
       setErrorMsg('');
       setParsedPreview(null);
+      setIsSpeaking(false);
       startListening();
     } else {
       cleanupAudio();
+      stopSpeaking();
       setIsRecording(false);
+      setIsSpeaking(false);
     }
     return () => {
       cleanupAudio();
+      stopSpeaking();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  const handleToggleSpeakPreview = async (preview: VoiceParsedBillPayload) => {
+    if (isSpeaking) {
+      stopSpeaking();
+      setIsSpeaking(false);
+      return;
+    }
+    const text = buildParsedPreviewSpeech(preview, txnType);
+    setIsSpeaking(true);
+    try {
+      await speakText(text, {
+        onEnd: () => setIsSpeaking(false),
+      });
+    } finally {
+      setIsSpeaking(false);
+    }
+  };
+
   const startListening = async () => {
+    stopSpeaking();
+    setIsSpeaking(false);
     setErrorMsg('');
     setIsRecording(true);
     audioChunksRef.current = [];
@@ -118,7 +154,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
           setLiveTranscript(text.trim());
         };
         rec.onerror = () => {
-          // Audio MediaRecorder fallback will handle Groq Whisper transcription
+          // Audio MediaRecorder fallback will handle Groq Whisper / Gemini Audio transcription
         };
         rec.start();
         recognitionRef.current = rec;
@@ -127,12 +163,14 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
       }
     }
 
-    // Layer A2: Start MediaRecorder + AudioContext AnalyserNode (works reliably in Android WebView)
+    // Layer A2: Start MediaRecorder + AudioContext AnalyserNode
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioCtxRef.current = audioCtx;
       const source = audioCtx.createMediaStreamSource(stream);
@@ -152,13 +190,14 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
       };
       animateBars();
 
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/mp4')
-        ? 'audio/mp4'
-        : 'audio/webm';
+      const supportedMime = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'].find(
+        (m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)
+      );
 
-      const recorder = new MediaRecorder(stream, { mimeType });
+      const recorder = supportedMime
+        ? new MediaRecorder(stream, { mimeType: supportedMime })
+        : new MediaRecorder(stream);
+
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
@@ -169,7 +208,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
     } catch {
       setIsRecording(false);
       setErrorMsg(
-        'Microphone permission is unavailable in this browser frame. You can type or edit your bill command below and tap Extract Bill.'
+        'Microphone permission is unavailable in this browser frame. You can type or edit your bill command below and tap Extract Bill from Text.'
       );
     }
   };
@@ -182,7 +221,6 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
     let finalTranscript = liveTranscript.trim();
 
     try {
-      // Stop MediaRecorder and get audio blob for Groq Whisper / Gemini Audio transcription
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state !== 'inactive') {
         const audioBlob: Blob = await new Promise((resolve) => {
@@ -235,13 +273,18 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
       });
 
       if (!parseRes.ok) {
-        throw new Error('Voice parsing failed');
+        const errData = (await parseRes.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errData.error || 'Voice/Text parsing failed');
       }
 
       const data = (await parseRes.json()) as { parsed: VoiceParsedBillPayload };
       setParsedPreview(data.parsed);
+
+      if (autoSpeak && data.parsed) {
+        handleToggleSpeakPreview(data.parsed);
+      }
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to process voice');
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to process voice/text command');
     } finally {
       setIsProcessing(false);
     }
@@ -259,16 +302,37 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
             CM Voice AI · {txnType}
           </span>
         </div>
-        <button
-          onClick={() => {
-            cleanupAudio();
-            onClose();
-          }}
-          className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/20 transition"
-          aria-label="Close voice listening"
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !autoSpeak;
+              setAutoSpeak(next);
+              if (!next) {
+                stopSpeaking();
+                setIsSpeaking(false);
+              }
+            }}
+            className={`px-2.5 py-1.5 rounded-full text-[11px] font-bold flex items-center gap-1 transition ${
+              autoSpeak ? 'bg-[#1B9B62] text-white' : 'bg-white/10 text-slate-300'
+            }`}
+            title="Toggle automatic voice readout (Text-to-Speech)"
+          >
+            {autoSpeak ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+            <span>{autoSpeak ? 'TTS On' : 'TTS Off'}</span>
+          </button>
+          <button
+            onClick={() => {
+              cleanupAudio();
+              stopSpeaking();
+              onClose();
+            }}
+            className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/20 transition"
+            aria-label="Close voice listening"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {/* Center Stage: Live Serrated Receipt Preview or Listening Soundwaves */}
@@ -289,9 +353,23 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
                     <p className="text-xs text-slate-500 font-mono-num">{parsedPreview.phone}</p>
                   )}
                 </div>
-                <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-[#1B9B62]/10 text-[#1B9B62]">
-                  {parsedPreview.paymentType || 'Cash'}
-                </span>
+                <div className="flex flex-col items-end gap-1.5">
+                  <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-[#1B9B62]/10 text-[#1B9B62]">
+                    {parsedPreview.paymentType || 'Cash'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleSpeakPreview(parsedPreview)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1 transition ${
+                      isSpeaking
+                        ? 'bg-rose-100 text-rose-700'
+                        : 'bg-purple-100 text-[#6A4CFF] hover:bg-purple-200'
+                    }`}
+                  >
+                    <Volume2 className="w-3 h-3" />
+                    <span>{isSpeaking ? 'Stop' : 'सुनें (Speak)'}</span>
+                  </button>
+                </div>
               </div>
 
               {parsedPreview.items && parsedPreview.items.length > 0 && (
@@ -299,7 +377,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
                   {parsedPreview.items.map((it, idx) => (
                     <div key={idx} className="flex items-center justify-between text-xs">
                       <span className="font-semibold text-slate-800">
-                        {it.name} ({it.qty} {it.unit})
+                        {it.name} ({it.qty} {it.unit} × ₹{it.rate})
                       </span>
                       <span className="font-mono-num font-bold text-slate-900">
                         ₹{(Number(it.total) || 0).toFixed(2)}
@@ -328,7 +406,9 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
 
             <div className="mt-5 flex gap-3">
               <button
+                type="button"
                 onClick={() => {
+                  stopSpeaking();
                   setParsedPreview(null);
                   startListening();
                 }}
@@ -337,7 +417,9 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
                 Speak Again
               </button>
               <button
+                type="button"
                 onClick={() => {
+                  stopSpeaking();
                   onParsedResult(parsedPreview, liveTranscript);
                 }}
                 className="flex-1 py-3.5 rounded-2xl bg-[#1B9B62] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-[#1B9B62]/30 hover:bg-[#168452] transition"
@@ -383,7 +465,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
                   <Volume2 className="w-3.5 h-3.5 text-[#34D399]" />
-                  Live Transcript
+                  Live Transcript / Text Input
                 </span>
                 <span className="text-[11px] text-slate-400 flex items-center gap-1">
                   <Edit3 className="w-3 h-3" /> Editable
@@ -413,6 +495,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
           <div className="flex items-center justify-center gap-5">
             {isRecording ? (
               <button
+                type="button"
                 onClick={stopAndParse}
                 disabled={isProcessing}
                 className="w-20 h-20 rounded-full voice-orb-active flex items-center justify-center text-white transition active:scale-95"
@@ -422,6 +505,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
               </button>
             ) : (
               <button
+                type="button"
                 onClick={startListening}
                 disabled={isProcessing}
                 className="w-20 h-20 rounded-full voice-orb-glow flex items-center justify-center text-white transition active:scale-95"
@@ -439,14 +523,16 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
           <div className="flex items-center gap-3 w-full">
             {isRecording ? (
               <button
+                type="button"
                 onClick={stopAndParse}
                 className="w-full py-3.5 rounded-2xl bg-[#1B9B62] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg"
               >
                 <Square className="w-4 h-4 fill-current" />
-                ✓ Done &amp; Extract Bill
+                Done &amp; Extract Bill
               </button>
             ) : (
               <button
+                type="button"
                 onClick={stopAndParse}
                 disabled={isProcessing || !liveTranscript.trim()}
                 className="w-full py-3.5 rounded-2xl bg-[#6A4CFF] text-white font-bold text-sm flex items-center justify-center gap-2 disabled:opacity-40"

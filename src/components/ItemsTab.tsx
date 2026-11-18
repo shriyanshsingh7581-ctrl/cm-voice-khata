@@ -12,6 +12,7 @@ import {
   Trash2,
   X,
   Loader2,
+  Volume2,
 } from 'lucide-react';
 import { CatalogItem, ShopSettings } from '../types';
 import {
@@ -20,6 +21,7 @@ import {
   formatINR,
   parseCatalogExcelFile,
 } from '../services/exportService';
+import { speakText } from '../services/ttsService';
 
 interface ItemsTabProps {
   items: CatalogItem[];
@@ -52,6 +54,7 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
 
   const [voiceInput, setVoiceInput] = useState('');
   const [voiceParsing, setVoiceParsing] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
   const [importing, setImporting] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -118,26 +121,31 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
   const handleVoiceParseItem = async () => {
     if (!voiceInput.trim()) return;
     setVoiceParsing(true);
+    setVoiceError('');
     try {
       const res = await fetch('/api/ai/parse-item', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript: voiceInput }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as {
-          parsed?: Partial<CatalogItem>;
-        };
-        const p = data.parsed || {};
-        if (p.name) setName(p.name);
-        if (p.unit) setUnit(p.unit);
-        if (typeof p.salePrice === 'number') setSalePrice(String(p.salePrice));
-        if (typeof p.purchasePrice === 'number') setPurchasePrice(String(p.purchasePrice));
-        if (typeof p.stockQty === 'number') setStockQty(String(p.stockQty));
-        if (typeof p.gstPercent === 'number') setGstPercent(String(p.gstPercent));
-        if (p.hsn) setHsn(p.hsn);
-        if (p.barcode) setBarcode(p.barcode);
+      if (!res.ok) {
+        const errData = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(errData.error || 'Could not parse item text');
       }
+      const data = (await res.json()) as {
+        parsed?: Partial<CatalogItem>;
+      };
+      const p = data.parsed || {};
+      if (p.name) setName(p.name);
+      if (p.unit) setUnit(p.unit);
+      if (typeof p.salePrice === 'number') setSalePrice(String(p.salePrice));
+      if (typeof p.purchasePrice === 'number') setPurchasePrice(String(p.purchasePrice));
+      if (typeof p.stockQty === 'number') setStockQty(String(p.stockQty));
+      if (typeof p.gstPercent === 'number') setGstPercent(String(p.gstPercent));
+      if (p.hsn) setHsn(p.hsn);
+      if (p.barcode) setBarcode(p.barcode);
+    } catch (err) {
+      setVoiceError(err instanceof Error ? err.message : 'AI item fill failed');
     } finally {
       setVoiceParsing(false);
     }
@@ -167,14 +175,6 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
 
   return (
     <div className="space-y-4 pb-28">
-      <input
-        ref={importInputRef}
-        type="file"
-        accept=".xlsx,.xls,.csv"
-        onChange={handleImportFile}
-        className="hidden"
-      />
-
       {/* Top Inventory KPI Card */}
       <div className="bg-white rounded-2xl p-4 border border-slate-200/80 flex items-center justify-between">
         <div>
@@ -191,18 +191,22 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
 
       {/* Action Toolbar: Import, PDF, Excel, Barcode, Voice Add */}
       <div className="flex items-center gap-2 overflow-x-auto pb-1">
-        <button
-          onClick={() => importInputRef.current?.click()}
-          disabled={importing}
-          className="px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0"
-        >
+        <label className="relative overflow-hidden px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-800 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer">
           {importing ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
           ) : (
             <CloudUpload className="w-3.5 h-3.5 text-[#6A4CFF]" />
           )}
-          ☁️ Import
-        </button>
+          <span>Import</span>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            disabled={importing}
+            onChange={handleImportFile}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+          />
+        </label>
         <button
           onClick={() =>
             exportReportToPDF(
@@ -368,15 +372,31 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
           >
             <div className="flex items-center justify-between">
               <h3 className="font-extrabold text-base text-slate-900">
-                {editingItem ? 'Edit Product' : '🎙️ Add New Item'}
+                {editingItem ? 'Edit Product' : 'Add New Item'}
               </h3>
-              <button
-                type="button"
-                onClick={() => setShowAddEditModal(false)}
-                className="p-1.5 rounded-full bg-slate-100"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1.5">
+                {name.trim() && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      speakText(
+                        `${name}, sale price ${salePrice || 0} rupaye per ${unit || 'piece'}, stock ${stockQty || 0} ${unit || 'piece'}.`
+                      )
+                    }
+                    className="px-2.5 py-1 rounded-full bg-emerald-50 text-[#1B9B62] text-[11px] font-bold flex items-center gap-1"
+                  >
+                    <Volume2 className="w-3 h-3" />
+                    सुनें
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowAddEditModal(false)}
+                  className="p-1.5 rounded-full bg-slate-100"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {/* AI Voice / Hinglish Quick Fill */}
@@ -406,6 +426,9 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
                   Fill
                 </button>
               </div>
+              {voiceError && (
+                <p className="text-[11px] font-semibold text-rose-600">{voiceError}</p>
+              )}
             </div>
 
             <div>

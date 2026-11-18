@@ -18,6 +18,7 @@ import {
   ZoomIn,
   WifiOff,
   CheckCircle2,
+  Volume2,
 } from 'lucide-react';
 import {
   auth,
@@ -76,6 +77,7 @@ import {
   formatINR,
   getWhatsAppShareUrl,
 } from './services/exportService';
+import { buildBillSpeech, speakText, stopSpeaking } from './services/ttsService';
 import { useOnlineStatus } from './hooks/usePWAInstall';
 
 type NavTab = 'home' | 'parties' | 'bills' | 'items' | 'more';
@@ -119,6 +121,7 @@ export default function App() {
 
   const [cameraModalOpen, setCameraModalOpen] = useState(false);
   const [cameraMode, setCameraMode] = useState<'bill' | 'barcode'>('bill');
+  const [speakingRecentId, setSpeakingRecentId] = useState<string | null>(null);
   const [barcodeCallback, setBarcodeCallback] = useState<((code: string) => void) | null>(null);
 
   const [reportModalOpen, setReportModalOpen] = useState(false);
@@ -768,6 +771,31 @@ export default function App() {
                             <MessageCircle className="w-3.5 h-3.5" />
                             WhatsApp
                           </a>
+                          <button
+                            onClick={async () => {
+                              if (speakingRecentId === entry.bill.id) {
+                                stopSpeaking();
+                                setSpeakingRecentId(null);
+                                return;
+                              }
+                              setSpeakingRecentId(entry.bill.id);
+                              try {
+                                await speakText(buildBillSpeech(entry.bill), {
+                                  onEnd: () => setSpeakingRecentId(null),
+                                });
+                              } finally {
+                                setSpeakingRecentId(null);
+                              }
+                            }}
+                            className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1 ${
+                              speakingRecentId === entry.bill.id
+                                ? 'bg-rose-100 text-rose-700'
+                                : 'bg-purple-50 text-[#6A4CFF]'
+                            }`}
+                          >
+                            <Volume2 className="w-3.5 h-3.5" />
+                            {speakingRecentId === entry.bill.id ? 'Stop' : 'सुनें'}
+                          </button>
                         </div>
                       </div>
                     ) : (

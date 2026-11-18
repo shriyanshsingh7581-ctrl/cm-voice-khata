@@ -13,6 +13,7 @@ import {
   Camera,
   Users,
   X,
+  Volume2,
 } from 'lucide-react';
 import {
   Bill,
@@ -29,6 +30,7 @@ import {
   formatINR,
   getWhatsAppShareUrl,
 } from '../services/exportService';
+import { speakText, stopSpeaking } from '../services/ttsService';
 
 interface PartiesTabProps {
   parties: Party[];
@@ -221,6 +223,23 @@ export const PartiesTab: React.FC<PartiesTabProps> = ({
               >
                 {formatINR(Math.abs(selectedParty.balance))}
               </p>
+              <button
+                type="button"
+                onClick={() => {
+                  const dir =
+                    selectedParty.balance >= 0
+                      ? 'lena baki hai'
+                      : 'dena baki hai';
+                  speakText(
+                    `${selectedParty.name} se ${Math.abs(selectedParty.balance)} rupaye ${dir}.`
+                  );
+                }}
+                onDoubleClick={() => stopSpeaking()}
+                className="mt-1.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-purple-50 text-[#6A4CFF] text-[11px] font-bold"
+              >
+                <Volume2 className="w-3 h-3" />
+                सुनें
+              </button>
             </div>
           </div>
 
