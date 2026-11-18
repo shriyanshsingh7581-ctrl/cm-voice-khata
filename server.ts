@@ -473,11 +473,25 @@ function fallbackParseItem(transcript: string) {
   };
 }
 
-async function startServer() {
+export function createApiApp() {
   const app = express();
-  const PORT = 3000;
+
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   app.use(express.json({ limit: '25mb' }));
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, provider: 'openrouter', app: 'CM Voice Khata' });
+  });
 
   // 1. Voice Speech-to-Text Transcription via OpenRouter (google/gemini-2.5-flash-lite)
   app.post('/api/ai/transcribe', async (req, res) => {
@@ -775,6 +789,13 @@ Rules:
     }
   });
 
+  return app;
+}
+
+async function startServer() {
+  const app = createApiApp();
+  const PORT = Number(process.env.PORT) || 3000;
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -794,4 +815,6 @@ Rules:
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}

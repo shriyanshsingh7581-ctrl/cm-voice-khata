@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { TransactionType, VoiceParsedBillPayload, Party, CatalogItem } from '../types';
 import { fileToBase64 } from '../services/cloudinary';
+import { apiUrl } from '../services/apiBase';
 import { buildParsedPreviewSpeech, speakText, stopSpeaking } from '../services/ttsService';
 
 interface VoiceListeningModalProps {
@@ -235,7 +236,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
         if (audioBlob.size > 800) {
           try {
             const { base64, mimeType } = await fileToBase64(audioBlob);
-            const transcribeRes = await fetch('/api/ai/transcribe', {
+            const transcribeRes = await fetch(apiUrl('/api/ai/transcribe'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ audioBase64: base64, mimeType, language: 'hi' }),
@@ -261,7 +262,7 @@ export const VoiceListeningModal: React.FC<VoiceListeningModalProps> = ({
         return;
       }
 
-      const parseRes = await fetch('/api/ai/parse-voice', {
+      const parseRes = await fetch(apiUrl('/api/ai/parse-voice'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -332,6 +332,13 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
         parsed.totalAmount > itemsSum * (1 + parsed.gst / 200)
       ) {
         setGstInclusive(false);
+      } else if (
+        parsed.gst > 0 &&
+        parsed.totalAmount &&
+        itemsSum > 0 &&
+        Math.abs(itemsSum - parsed.totalAmount) <= 5
+      ) {
+        setGstInclusive(true);
       }
     }
     if (typeof parsed.receivedAmount === 'number') {

@@ -1,4 +1,5 @@
 import { Bill, VoiceParsedBillPayload } from '../types';
+import { apiUrl } from './apiBase';
 
 let activeAudio: HTMLAudioElement | null = null;
 let activeObjectUrl: string | null = null;
@@ -64,7 +65,7 @@ export async function speakText(
   stopSpeaking();
 
   try {
-    const res = await fetch('/api/ai/tts', {
+    const res = await fetch(apiUrl('/api/ai/tts'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

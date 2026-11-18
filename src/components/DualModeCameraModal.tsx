@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Party, VoiceParsedBillPayload } from '../types';
 import { compressImageForAI, fileToBase64, uploadToCloudinary } from '../services/cloudinary';
+import { apiUrl } from '../services/apiBase';
 
 interface DualModeCameraModalProps {
   isOpen: boolean;
@@ -329,7 +330,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     try {
       const [uploadResult, aiResult] = await Promise.allSettled([
         uploadToCloudinary(capturedFile || capturedDataUrl),
-        fetch('/api/ai/scan-bill', {
+        fetch(apiUrl('/api/ai/scan-bill'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: controller.signal,
@@ -355,12 +356,14 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         try {
           parsedErr = (JSON.parse(rawErr) as { error?: string }).error || '';
         } catch {
-          // non-JSON response (e.g. 502/413 gateway error)
+          // non-JSON response (e.g. 502/413/404 gateway HTML)
         }
         throw new Error(
           parsedErr ||
             (aiRes.status === 413
               ? 'Photo size is too large. Please retake or crop closer to the bill.'
+              : aiRes.status === 404
+              ? 'AI backend server (/api/ai/scan-bill) not found (404). Make sure Node backend (npm start) is running or set VITE_API_BASE_URL for static APK builds.'
               : `AI scanning failed (${aiRes.status}). Please retry or save Normal Photo.`)
         );
       }

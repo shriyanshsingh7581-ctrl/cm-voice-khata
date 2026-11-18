@@ -21,6 +21,7 @@ import {
   formatINR,
   parseCatalogExcelFile,
 } from '../services/exportService';
+import { apiUrl } from '../services/apiBase';
 import { speakText } from '../services/ttsService';
 
 interface ItemsTabProps {
@@ -123,7 +124,7 @@ export const ItemsTab: React.FC<ItemsTabProps> = ({
     setVoiceParsing(true);
     setVoiceError('');
     try {
-      const res = await fetch('/api/ai/parse-item', {
+      const res = await fetch(apiUrl('/api/ai/parse-item'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ transcript: voiceInput }),
