@@ -1,0 +1,6 @@
+{
+  "name": "CM Voice Khata",
+  "description": "AI Digital Khata & Smart Voice Invoice Management App with Dual-Mode Bill Photo Saving, AI Bill Scanning, and Live Ledger Accounting.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

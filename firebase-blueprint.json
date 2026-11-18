@@ -1,0 +1,162 @@
+{
+  "entities": {
+    "BusinessProfile": {
+      "title": "BusinessProfile",
+      "description": "User business profile and invoice customization details",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "businessName": { "type": "string", "maxLength": 120 },
+        "industry": { "type": "string", "maxLength": 80 },
+        "gstin": { "type": "string", "maxLength": 30 },
+        "phone1": { "type": "string", "maxLength": 25 },
+        "phone2": { "type": "string", "maxLength": 25 },
+        "email": { "type": "string", "maxLength": 120 },
+        "address": { "type": "string", "maxLength": 300 },
+        "state": { "type": "string", "maxLength": 60 },
+        "businessType": { "type": "string", "maxLength": 60 },
+        "booksBeginningDate": { "type": "string", "maxLength": 40 },
+        "logoUrl": { "type": "string", "maxLength": 500 },
+        "signatureUrl": { "type": "string", "maxLength": 2000 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["ownerId", "businessName", "updatedAt"]
+    },
+    "ShopSettings": {
+      "title": "ShopSettings",
+      "description": "13 shop configuration toggles and preferences",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "askWhichCustomer": { "type": "boolean" },
+        "roundOffBillTotal": { "type": "boolean" },
+        "whatsappBillToCustomer": { "type": "boolean" },
+        "saveNewItemsToCatalog": { "type": "boolean" },
+        "pricesIncludeGst": { "type": "boolean" },
+        "defaultInvoiceDesign": { "type": "string", "maxLength": 40 },
+        "billLanguage": { "type": "string", "maxLength": 40 },
+        "bluetoothPrinter": { "type": "boolean" },
+        "showPhoneOnInvoice": { "type": "boolean" },
+        "showPartyBalanceOnBills": { "type": "boolean" },
+        "showPaidStampOnBills": { "type": "boolean" },
+        "showBranding": { "type": "boolean" },
+        "nextInvoiceNumber": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["ownerId", "updatedAt"]
+    },
+    "Party": {
+      "title": "Party",
+      "description": "Customer or Supplier party ledger record",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 25 },
+        "partyType": { "type": "string", "enum": ["customer", "supplier"], "maxLength": 20 },
+        "gstin": { "type": "string", "maxLength": 30 },
+        "address": { "type": "string", "maxLength": 300 },
+        "balance": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["ownerId", "name", "partyType", "balance", "createdAt", "updatedAt"]
+    },
+    "Bill": {
+      "title": "Bill",
+      "description": "Digital transaction or invoice across all 11 transaction types",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "billNumber": { "type": "string", "maxLength": 40 },
+        "supplierBillNo": { "type": "string", "maxLength": 60 },
+        "txnType": { "type": "string", "maxLength": 40 },
+        "partyId": { "type": "string", "maxLength": 128 },
+        "partyName": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 25 },
+        "gstin": { "type": "string", "maxLength": 30 },
+        "itemsSummary": { "type": "string", "maxLength": 4000 },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "deliveryCharge": { "type": "number" },
+        "gstPercent": { "type": "number" },
+        "gstAmount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "receivedAmount": { "type": "number" },
+        "balanceDue": { "type": "number" },
+        "paymentMode": { "type": "string", "maxLength": 30 },
+        "category": { "type": "string", "maxLength": 80 },
+        "note": { "type": "string", "maxLength": 500 },
+        "terms": { "type": "string", "maxLength": 500 },
+        "attachmentUrl": { "type": "string", "maxLength": 500 },
+        "date": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["ownerId", "billNumber", "txnType", "partyName", "totalAmount", "receivedAmount", "balanceDue", "paymentMode", "date", "createdAt", "updatedAt"]
+    },
+    "SavedBillPhoto": {
+      "title": "SavedBillPhoto",
+      "description": "Normal physical bill photo saved directly without AI itemization",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "imageUrl": { "type": "string", "maxLength": 500 },
+        "partyId": { "type": "string", "maxLength": 128 },
+        "partyName": { "type": "string", "maxLength": 120 },
+        "billType": { "type": "string", "enum": ["Sale", "Purchase", "Expense"], "maxLength": 20 },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "maxLength": 40 },
+        "note": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["ownerId", "imageUrl", "billType", "amount", "date", "createdAt", "updatedAt"]
+    },
+    "CatalogItem": {
+      "title": "CatalogItem",
+      "description": "Product inventory item with stock and pricing",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "maxLength": 120 },
+        "unit": { "type": "string", "maxLength": 30 },
+        "salePrice": { "type": "number" },
+        "purchasePrice": { "type": "number" },
+        "stockQty": { "type": "number" },
+        "barcode": { "type": "string", "maxLength": 80 },
+        "hsn": { "type": "string", "maxLength": 30 },
+        "gstPercent": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 50 },
+        "updatedAt": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["ownerId", "name", "unit", "salePrice", "purchasePrice", "stockQty", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}/businessProfile/{docId}": {
+      "schema": { "$ref": "#/entities/BusinessProfile" },
+      "description": "Per-user business profile document"
+    },
+    "/users/{uid}/shopSettings/{docId}": {
+      "schema": { "$ref": "#/entities/ShopSettings" },
+      "description": "Per-user shop settings document"
+    },
+    "/users/{uid}/parties/{partyId}": {
+      "schema": { "$ref": "#/entities/Party" },
+      "description": "Per-user customer and supplier parties"
+    },
+    "/users/{uid}/bills/{billId}": {
+      "schema": { "$ref": "#/entities/Bill" },
+      "description": "Per-user digital invoices and transactions"
+    },
+    "/users/{uid}/savedBillPhotos/{photoId}": {
+      "schema": { "$ref": "#/entities/SavedBillPhoto" },
+      "description": "Per-user normal saved bill photos"
+    },
+    "/users/{uid}/items/{itemId}": {
+      "schema": { "$ref": "#/entities/CatalogItem" },
+      "description": "Per-user product inventory items"
+    }
+  }
+}

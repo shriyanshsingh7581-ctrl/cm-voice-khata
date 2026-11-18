@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #FBF9F1;
+    color: #0f172a;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Serrated receipt paper top and bottom edges */
+.serrated-top {
+  background-image: radial-gradient(circle at 10px -4px, transparent 10px, #ffffff 11px);
+  background-size: 20px 16px;
+  background-repeat: repeat-x;
+}
+
+.serrated-bottom {
+  background-image: radial-gradient(circle at 10px 20px, transparent 10px, #ffffff 11px);
+  background-size: 20px 16px;
+  background-repeat: repeat-x;
+}
+
+/* 3D Glowing Voice Orb effect */
+.voice-orb-glow {
+  background: radial-gradient(circle at 30% 30%, #9D85FF 0%, #6A4CFF 55%, #4628D9 100%);
+  box-shadow:
+    0 10px 30px -5px rgba(106, 76, 255, 0.55),
+    inset 0 4px 12px rgba(255, 255, 255, 0.45),
+    inset 0 -6px 14px rgba(34, 15, 117, 0.6);
+}
+
+.voice-orb-active {
+  background: radial-gradient(circle at 30% 30%, #34D399 0%, #1B9B62 55%, #0D6E42 100%);
+  box-shadow:
+    0 12px 35px -4px rgba(27, 155, 98, 0.6),
+    inset 0 4px 12px rgba(255, 255, 255, 0.45),
+    inset 0 -6px 14px rgba(6, 78, 59, 0.6);
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.25);
+  border-radius: 9999px;
+}

@@ -1,0 +1,257 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isValidBusinessProfile(data, uid) {
+      return data.keys().hasAll(['ownerId', 'businessName', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'ownerId', 'businessName', 'industry', 'gstin', 'phone1', 'phone2',
+          'email', 'address', 'state', 'businessType', 'booksBeginningDate',
+          'logoUrl', 'signatureUrl', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid && data.ownerId == uid &&
+        data.businessName is string && data.businessName.size() <= 120 &&
+        (!('industry' in data) || (data.industry is string && data.industry.size() <= 80)) &&
+        (!('gstin' in data) || (data.gstin is string && data.gstin.size() <= 30)) &&
+        (!('phone1' in data) || (data.phone1 is string && data.phone1.size() <= 25)) &&
+        (!('phone2' in data) || (data.phone2 is string && data.phone2.size() <= 25)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('state' in data) || (data.state is string && data.state.size() <= 60)) &&
+        (!('businessType' in data) || (data.businessType is string && data.businessType.size() <= 60)) &&
+        (!('booksBeginningDate' in data) || (data.booksBeginningDate is string && data.booksBeginningDate.size() <= 40)) &&
+        (!('logoUrl' in data) || (data.logoUrl is string && data.logoUrl.size() <= 500)) &&
+        (!('signatureUrl' in data) || (data.signatureUrl is string && data.signatureUrl.size() <= 2000)) &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidShopSettings(data, uid) {
+      return data.keys().hasAll(['ownerId', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'ownerId', 'askWhichCustomer', 'roundOffBillTotal', 'whatsappBillToCustomer',
+          'saveNewItemsToCatalog', 'pricesIncludeGst', 'defaultInvoiceDesign',
+          'billLanguage', 'bluetoothPrinter', 'showPhoneOnInvoice',
+          'showPartyBalanceOnBills', 'showPaidStampOnBills', 'showBranding',
+          'nextInvoiceNumber', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid && data.ownerId == uid &&
+        (!('askWhichCustomer' in data) || data.askWhichCustomer is bool) &&
+        (!('roundOffBillTotal' in data) || data.roundOffBillTotal is bool) &&
+        (!('whatsappBillToCustomer' in data) || data.whatsappBillToCustomer is bool) &&
+        (!('saveNewItemsToCatalog' in data) || data.saveNewItemsToCatalog is bool) &&
+        (!('pricesIncludeGst' in data) || data.pricesIncludeGst is bool) &&
+        (!('defaultInvoiceDesign' in data) || (data.defaultInvoiceDesign is string && data.defaultInvoiceDesign.size() <= 40)) &&
+        (!('billLanguage' in data) || (data.billLanguage is string && data.billLanguage.size() <= 40)) &&
+        (!('bluetoothPrinter' in data) || data.bluetoothPrinter is bool) &&
+        (!('showPhoneOnInvoice' in data) || data.showPhoneOnInvoice is bool) &&
+        (!('showPartyBalanceOnBills' in data) || data.showPartyBalanceOnBills is bool) &&
+        (!('showPaidStampOnBills' in data) || data.showPaidStampOnBills is bool) &&
+        (!('showBranding' in data) || data.showBranding is bool) &&
+        (!('nextInvoiceNumber' in data) || data.nextInvoiceNumber is number) &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidParty(data, uid) {
+      return data.keys().hasAll(['ownerId', 'name', 'partyType', 'balance', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'ownerId', 'name', 'phone', 'partyType', 'gstin', 'address',
+          'balance', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid && data.ownerId == uid &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 25)) &&
+        data.partyType is string && data.partyType.size() <= 20 && (data.partyType == 'customer' || data.partyType == 'supplier') &&
+        (!('gstin' in data) || (data.gstin is string && data.gstin.size() <= 30)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        data.balance is number &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidBill(data, uid) {
+      return data.keys().hasAll([
+          'ownerId', 'billNumber', 'txnType', 'partyName', 'totalAmount',
+          'receivedAmount', 'balanceDue', 'paymentMode', 'date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'billNumber', 'supplierBillNo', 'txnType', 'partyId',
+          'partyName', 'phone', 'gstin', 'itemsSummary', 'subtotal', 'discount',
+          'deliveryCharge', 'gstPercent', 'gstAmount', 'totalAmount',
+          'receivedAmount', 'balanceDue', 'paymentMode', 'category', 'note',
+          'terms', 'attachmentUrl', 'date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid && data.ownerId == uid &&
+        data.billNumber is string && data.billNumber.size() <= 40 &&
+        (!('supplierBillNo' in data) || (data.supplierBillNo is string && data.supplierBillNo.size() <= 60)) &&
+        data.txnType is string && data.txnType.size() <= 40 &&
+        (!('partyId' in data) || (data.partyId is string && data.partyId.size() <= 128)) &&
+        data.partyName is string && data.partyName.size() <= 120 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 25)) &&
+        (!('gstin' in data) || (data.gstin is string && data.gstin.size() <= 30)) &&
+        (!('itemsSummary' in data) || (data.itemsSummary is string && data.itemsSummary.size() <= 4000)) &&
+        (!('subtotal' in data) || data.subtotal is number) &&
+        (!('discount' in data) || data.discount is number) &&
+        (!('deliveryCharge' in data) || data.deliveryCharge is number) &&
+        (!('gstPercent' in data) || data.gstPercent is number) &&
+        (!('gstAmount' in data) || data.gstAmount is number) &&
+        data.totalAmount is number &&
+        data.receivedAmount is number &&
+        data.balanceDue is number &&
+        data.paymentMode is string && data.paymentMode.size() <= 30 &&
+        (!('category' in data) || (data.category is string && data.category.size() <= 80)) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        (!('terms' in data) || (data.terms is string && data.terms.size() <= 500)) &&
+        (!('attachmentUrl' in data) || (data.attachmentUrl is string && data.attachmentUrl.size() <= 500)) &&
+        data.date is string && data.date.size() <= 40 &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidSavedBillPhoto(data, uid) {
+      return data.keys().hasAll(['ownerId', 'imageUrl', 'billType', 'amount', 'date', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'ownerId', 'imageUrl', 'partyId', 'partyName', 'billType',
+          'amount', 'date', 'note', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid && data.ownerId == uid &&
+        data.imageUrl is string && data.imageUrl.size() >= 1 && data.imageUrl.size() <= 500 &&
+        (!('partyId' in data) || (data.partyId is string && data.partyId.size() <= 128)) &&
+        (!('partyName' in data) || (data.partyName is string && data.partyName.size() <= 120)) &&
+        data.billType is string && data.billType.size() <= 20 && (data.billType == 'Sale' || data.billType == 'Purchase' || data.billType == 'Expense') &&
+        data.amount is number &&
+        data.date is string && data.date.size() <= 40 &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    function isValidCatalogItem(data, uid) {
+      return data.keys().hasAll(['ownerId', 'name', 'unit', 'salePrice', 'purchasePrice', 'stockQty', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'ownerId', 'name', 'unit', 'salePrice', 'purchasePrice',
+          'stockQty', 'barcode', 'hsn', 'gstPercent', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId.size() <= 128 && data.ownerId == request.auth.uid && data.ownerId == uid &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.unit is string && data.unit.size() <= 30 &&
+        data.salePrice is number &&
+        data.purchasePrice is number &&
+        data.stockQty is number &&
+        (!('barcode' in data) || (data.barcode is string && data.barcode.size() <= 80)) &&
+        (!('hsn' in data) || (data.hsn is string && data.hsn.size() <= 30)) &&
+        (!('gstPercent' in data) || data.gstPercent is number) &&
+        data.createdAt is string && data.createdAt.size() <= 50 &&
+        data.updatedAt is string && data.updatedAt.size() <= 50;
+    }
+
+    match /users/{uid}/businessProfile/{docId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(docId);
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isOwner(uid) && isValidId(uid) && isValidId(docId) && isValidBusinessProfile(incoming(), uid);
+      allow update: if isOwner(uid) && isValidId(uid) && isValidId(docId) && isValidBusinessProfile(incoming(), uid) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'businessName', 'industry', 'gstin', 'phone1', 'phone2',
+          'email', 'address', 'state', 'businessType', 'booksBeginningDate',
+          'logoUrl', 'signatureUrl', 'updatedAt'
+        ]);
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(docId);
+    }
+
+    match /users/{uid}/shopSettings/{docId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(docId);
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isOwner(uid) && isValidId(uid) && isValidId(docId) && isValidShopSettings(incoming(), uid);
+      allow update: if isOwner(uid) && isValidId(uid) && isValidId(docId) && isValidShopSettings(incoming(), uid) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'askWhichCustomer', 'roundOffBillTotal', 'whatsappBillToCustomer',
+          'saveNewItemsToCatalog', 'pricesIncludeGst', 'defaultInvoiceDesign',
+          'billLanguage', 'bluetoothPrinter', 'showPhoneOnInvoice',
+          'showPartyBalanceOnBills', 'showPaidStampOnBills', 'showBranding',
+          'nextInvoiceNumber', 'updatedAt'
+        ]);
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(docId);
+    }
+
+    match /users/{uid}/parties/{partyId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(partyId);
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isOwner(uid) && isValidId(uid) && isValidId(partyId) && isValidParty(incoming(), uid);
+      allow update: if isOwner(uid) && isValidId(uid) && isValidId(partyId) && isValidParty(incoming(), uid) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'phone', 'partyType', 'gstin', 'address', 'balance', 'updatedAt'
+        ]);
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(partyId);
+    }
+
+    match /users/{uid}/bills/{billId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(billId);
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isOwner(uid) && isValidId(uid) && isValidId(billId) && isValidBill(incoming(), uid);
+      allow update: if isOwner(uid) && isValidId(uid) && isValidId(billId) && isValidBill(incoming(), uid) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'billNumber', 'supplierBillNo', 'txnType', 'partyId', 'partyName',
+          'phone', 'gstin', 'itemsSummary', 'subtotal', 'discount',
+          'deliveryCharge', 'gstPercent', 'gstAmount', 'totalAmount',
+          'receivedAmount', 'balanceDue', 'paymentMode', 'category', 'note',
+          'terms', 'attachmentUrl', 'date', 'updatedAt'
+        ]);
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(billId);
+    }
+
+    match /users/{uid}/savedBillPhotos/{photoId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(photoId);
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isOwner(uid) && isValidId(uid) && isValidId(photoId) && isValidSavedBillPhoto(incoming(), uid);
+      allow update: if isOwner(uid) && isValidId(uid) && isValidId(photoId) && isValidSavedBillPhoto(incoming(), uid) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'imageUrl', 'partyId', 'partyName', 'billType', 'amount', 'date', 'note', 'updatedAt'
+        ]);
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(photoId);
+    }
+
+    match /users/{uid}/items/{itemId} {
+      allow get: if isOwner(uid) && isValidId(uid) && isValidId(itemId);
+      allow list: if isOwner(uid) && existing().ownerId == request.auth.uid;
+      allow create: if isOwner(uid) && isValidId(uid) && isValidId(itemId) && isValidCatalogItem(incoming(), uid);
+      allow update: if isOwner(uid) && isValidId(uid) && isValidId(itemId) && isValidCatalogItem(incoming(), uid) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'unit', 'salePrice', 'purchasePrice', 'stockQty',
+          'barcode', 'hsn', 'gstPercent', 'updatedAt'
+        ]);
+      allow delete: if isOwner(uid) && isValidId(uid) && isValidId(itemId);
+    }
+  }
+}
