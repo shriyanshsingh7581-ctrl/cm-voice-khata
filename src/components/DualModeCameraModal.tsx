@@ -12,7 +12,7 @@ import {
   SwitchCamera,
 } from 'lucide-react';
 import { Party, VoiceParsedBillPayload } from '../types';
-import { fileToBase64, uploadToCloudinary } from '../services/cloudinary';
+import { compressImageForAI, fileToBase64, uploadToCloudinary } from '../services/cloudinary';
 
 interface DualModeCameraModalProps {
   isOpen: boolean;
@@ -201,8 +201,18 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
   const handleCaptureFrame = () => {
     if (!videoRef.current) return;
     const video = videoRef.current;
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 720;
+    let width = video.videoWidth || 1280;
+    let height = video.videoHeight || 720;
+    const maxDim = 1600;
+    if (width > maxDim || height > maxDim) {
+      if (width >= height) {
+        height = Math.round((height * maxDim) / width);
+        width = maxDim;
+      } else {
+        width = Math.round((width * maxDim) / height);
+        height = maxDim;
+      }
+    }
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -210,7 +220,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
     const base64 = dataUrl.split(',')[1] || '';
     setCapturedDataUrl(dataUrl);
     setCapturedBase64(base64);
@@ -220,7 +230,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         if (blob) setCapturedFile(blob);
       },
       'image/jpeg',
-      0.88
+      0.85
     );
     stopCamera();
   };
@@ -232,8 +242,8 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     if (!file) return;
     setStatusError('');
     try {
-      const { base64, dataUrl, mimeType } = await fileToBase64(file);
       if (mode === 'barcode') {
+        const { dataUrl } = await fileToBase64(file);
         // Try BarcodeDetector on picked image if supported
         const win = window as unknown as {
           BarcodeDetector?: new (opts?: { formats: string[] }) => {
@@ -266,10 +276,11 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         return;
       }
 
-      setCapturedDataUrl(dataUrl);
-      setCapturedBase64(base64);
-      setCapturedMimeType(mimeType);
-      setCapturedFile(file);
+      const compressed = await compressImageForAI(file, 1600, 0.85);
+      setCapturedDataUrl(compressed.dataUrl);
+      setCapturedBase64(compressed.base64);
+      setCapturedMimeType(compressed.mimeType);
+      setCapturedFile(compressed.blob);
       stopCamera();
     } catch {
       setStatusError('Could not read the selected image.');
@@ -313,12 +324,15 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     if (!capturedBase64) return;
     setIsScanningAI(true);
     setStatusError('');
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 35000);
     try {
-      const [cloudinaryUrl, aiRes] = await Promise.all([
+      const [uploadResult, aiResult] = await Promise.allSettled([
         uploadToCloudinary(capturedFile || capturedDataUrl),
         fetch('/api/ai/scan-bill', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             imageBase64: capturedBase64,
             mimeType: capturedMimeType,
@@ -326,12 +340,33 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         }),
       ]);
 
+      if (aiResult.status === 'rejected') {
+        throw new Error(
+          aiResult.reason instanceof Error && aiResult.reason.name === 'AbortError'
+            ? 'AI scan timed out on slow network. Please retry or save Normal Photo.'
+            : 'Network error contacting AI scanner. Please retry.'
+        );
+      }
+
+      const aiRes = aiResult.value;
       if (!aiRes.ok) {
-        const errBody = (await aiRes.json().catch(() => ({}))) as { error?: string };
-        throw new Error(errBody.error || 'AI scanning failed on this photo');
+        const rawErr = await aiRes.text().catch(() => '');
+        let parsedErr = '';
+        try {
+          parsedErr = (JSON.parse(rawErr) as { error?: string }).error || '';
+        } catch {
+          // non-JSON response (e.g. 502/413 gateway error)
+        }
+        throw new Error(
+          parsedErr ||
+            (aiRes.status === 413
+              ? 'Photo size is too large. Please retake or crop closer to the bill.'
+              : `AI scanning failed (${aiRes.status}). Please retry or save Normal Photo.`)
+        );
       }
 
       const data = (await aiRes.json()) as { parsed: VoiceParsedBillPayload };
+      const cloudinaryUrl = uploadResult.status === 'fulfilled' ? uploadResult.value : '';
       onAIScanComplete(data.parsed, cloudinaryUrl);
       onClose();
     } catch (err) {
@@ -341,6 +376,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
           : 'AI scan failed. You can still save it as a Normal Bill Photo.'
       );
     } finally {
+      window.clearTimeout(timeoutId);
       setIsScanningAI(false);
     }
   };

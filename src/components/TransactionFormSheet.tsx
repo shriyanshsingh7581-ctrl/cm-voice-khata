@@ -180,6 +180,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
   const [discount, setDiscount] = useState('0');
   const [deliveryCharge, setDeliveryCharge] = useState('0');
   const [gstPercent, setGstPercent] = useState('0');
+  const [gstInclusive, setGstInclusive] = useState<boolean>(shopSettings.pricesIncludeGst);
   const [receivedAmount, setReceivedAmount] = useState('');
   const [receivedEditedManually, setReceivedEditedManually] = useState(false);
   const [paymentMode, setPaymentMode] = useState<'Cash' | 'Online' | 'Credit'>('Cash');
@@ -223,6 +224,11 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
       setDiscount(String(editingBill.discount || 0));
       setDeliveryCharge(String(editingBill.deliveryCharge || 0));
       setGstPercent(String(editingBill.gstPercent || 0));
+      setGstInclusive(
+        (editingBill.gstPercent || 0) > 0
+          ? editingBill.gstAmount <= 0
+          : shopSettings.pricesIncludeGst
+      );
       setReceivedAmount(String(editingBill.receivedAmount || 0));
       setReceivedEditedManually(true);
       setPaymentMode(editingBill.paymentMode || 'Cash');
@@ -268,6 +274,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
     setDiscount('0');
     setDeliveryCharge('0');
     setGstPercent('0');
+    setGstInclusive(shopSettings.pricesIncludeGst);
     setReceivedAmount('');
     setReceivedEditedManually(false);
     setPaymentMode('Cash');
@@ -275,7 +282,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
     setNote('');
     setTerms('Goods once sold will not be taken back without bill.');
     setAttachmentUrl('');
-  }, [isOpen, initialTxnType, initialParty, editingBill, shopSettings.nextInvoiceNumber]);
+  }, [isOpen, initialTxnType, initialParty, editingBill, shopSettings.nextInvoiceNumber, shopSettings.pricesIncludeGst]);
 
   // Apply voice or AI-scan prefilled payload when passed in
   useEffect(() => {
@@ -312,7 +319,21 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
     }
     if (typeof parsed.discount === 'number') setDiscount(String(parsed.discount));
     if (typeof parsed.deliveryCharge === 'number') setDeliveryCharge(String(parsed.deliveryCharge));
-    if (typeof parsed.gst === 'number') setGstPercent(String(parsed.gst));
+    if (typeof parsed.gst === 'number') {
+      setGstPercent(String(parsed.gst));
+      const itemsSum = (parsed.items || []).reduce(
+        (s, it) => s + (Number(it.total) || (Number(it.qty) || 1) * (Number(it.rate) || 0)),
+        0
+      );
+      if (
+        parsed.gst > 0 &&
+        parsed.totalAmount &&
+        itemsSum > 0 &&
+        parsed.totalAmount > itemsSum * (1 + parsed.gst / 200)
+      ) {
+        setGstInclusive(false);
+      }
+    }
     if (typeof parsed.receivedAmount === 'number') {
       setReceivedAmount(String(parsed.receivedAmount));
       setReceivedEditedManually(true);
@@ -332,7 +353,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
     const deliv = parseFloat(deliveryCharge) || 0;
     const gstPct = parseFloat(gstPercent) || 0;
     const taxable = Math.max(0, itemSubtotal - disc + deliv);
-    const gstAmt = shopSettings.pricesIncludeGst
+    const gstAmt = gstInclusive
       ? 0
       : Math.round(taxable * (gstPct / 100) * 100) / 100;
     let grandTotal = taxable + gstAmt;
@@ -360,7 +381,7 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
     discount,
     deliveryCharge,
     gstPercent,
-    shopSettings.pricesIncludeGst,
+    gstInclusive,
     shopSettings.roundOffBillTotal,
     paymentMode,
     receivedEditedManually,
@@ -903,9 +924,23 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-bold text-slate-500 mb-1">
-                      GST %
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] font-bold text-slate-500">GST %</label>
+                      {parseFloat(gstPercent) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setGstInclusive((v) => !v)}
+                          className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded ${
+                            gstInclusive
+                              ? 'bg-slate-100 text-slate-600'
+                              : 'bg-purple-100 text-[#6A4CFF]'
+                          }`}
+                          title="Tap to switch between Inclusive & Exclusive GST"
+                        >
+                          {gstInclusive ? 'Incl.' : '+Extra'}
+                        </button>
+                      )}
+                    </div>
                     <select
                       value={gstPercent}
                       onChange={(e) => setGstPercent(e.target.value)}
@@ -924,6 +959,14 @@ export const TransactionFormSheet: React.FC<TransactionFormSheetProps> = ({
 
             {/* Payment Mode & Received / Paid Summary */}
             <div className="space-y-3 pt-1">
+              {totals.gstAmount > 0 && (
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>GST ({gstPercent}% Extra)</span>
+                  <span className="font-mono-num font-bold text-slate-700">
+                    +₹{totals.gstAmount.toFixed(2)}
+                  </span>
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-slate-500">Grand Total</span>
                 <span className="text-2xl font-extrabold font-mono-num text-slate-900">

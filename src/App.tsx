@@ -283,6 +283,20 @@ export default function App() {
     }
   };
 
+  const getStockMultiplier = (txnType: TransactionType): number => {
+    if (
+      txnType === 'Sale' ||
+      txnType === 'Delivery Challan' ||
+      txnType === 'Purchase Return'
+    ) {
+      return -1;
+    }
+    if (txnType === 'Purchase Invoice' || txnType === 'Sale Return') {
+      return 1;
+    }
+    return 0;
+  };
+
   // Save Transaction with Live Automatic Accounting (Party Ledger + Stock + Invoice Counter)
   const handleSaveBill = async (
     billInput: Omit<Bill, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'> & { id?: string }
@@ -296,42 +310,55 @@ export default function App() {
       billInput.txnType === 'Purchase Return' ||
       billInput.txnType === 'Purchase Order';
 
+    const prevBill = billInput.id ? bills.find((b) => b.id === billInput.id) : undefined;
+    const oldDelta =
+      prevBill && prevBill.txnType !== 'Expense'
+        ? getPartyBalanceDelta(prevBill.txnType, prevBill.totalAmount, prevBill.balanceDue)
+        : 0;
+    const oldParty =
+      prevBill && prevBill.txnType !== 'Expense'
+        ? parties.find(
+            (p) =>
+              (prevBill.partyId && p.id === prevBill.partyId) ||
+              p.name.trim().toLowerCase() === prevBill.partyName.trim().toLowerCase()
+          )
+        : undefined;
+
     // 1. Resolve or Auto-create Party (except Expense)
     let resolvedPartyId = billInput.partyId;
     if (billInput.txnType !== 'Expense') {
-      let existingParty = parties.find(
+      const existingParty = parties.find(
         (p) =>
           (resolvedPartyId && p.id === resolvedPartyId) ||
-          p.name.toLowerCase() === billInput.partyName.trim().toLowerCase()
+          p.name.trim().toLowerCase() === billInput.partyName.trim().toLowerCase()
       );
-
-      let oldDelta = 0;
-      if (billInput.id) {
-        const prevBill = bills.find((b) => b.id === billInput.id);
-        if (prevBill) {
-          oldDelta = getPartyBalanceDelta(
-            prevBill.txnType,
-            prevBill.totalAmount,
-            prevBill.balanceDue
-          );
-        }
-      }
 
       const newDelta = getPartyBalanceDelta(
         billInput.txnType,
         billInput.totalAmount,
         billInput.balanceDue
       );
-      const netDelta = newDelta - oldDelta;
+
+      const sameParty = Boolean(oldParty && existingParty && oldParty.id === existingParty.id);
+
+      // If edited bill moved to a different party (or became a new party), reverse oldDelta on oldParty
+      if (oldParty && !sameParty && oldDelta !== 0) {
+        await upsertParty(uid, {
+          ...oldParty,
+          balance: Math.round((oldParty.balance - oldDelta) * 100) / 100,
+        });
+      }
+
+      const targetDelta = sameParty ? newDelta - oldDelta : newDelta;
 
       if (existingParty) {
         resolvedPartyId = existingParty.id;
-        if (netDelta !== 0 || (billInput.phone && !existingParty.phone)) {
+        if (targetDelta !== 0 || (billInput.phone && !existingParty.phone)) {
           await upsertParty(uid, {
             ...existingParty,
             phone: billInput.phone || existingParty.phone,
             gstin: billInput.gstin || existingParty.gstin,
-            balance: Math.round((existingParty.balance + netDelta) * 100) / 100,
+            balance: Math.round((existingParty.balance + targetDelta) * 100) / 100,
           });
         }
       } else {
@@ -348,30 +375,75 @@ export default function App() {
         });
         if (created) resolvedPartyId = created.id;
       }
+    } else if (oldParty && oldDelta !== 0) {
+      // Bill switched from customer/supplier transaction to Expense — reverse old party ledger
+      await upsertParty(uid, {
+        ...oldParty,
+        balance: Math.round((oldParty.balance - oldDelta) * 100) / 100,
+      });
+      resolvedPartyId = '';
     }
 
-    // 2. Adjust Item Stock & Auto-save New Items to Catalog (on new bills)
-    if (!billInput.id && billInput.items.length > 0) {
-      const stockMultiplier =
-        billInput.txnType === 'Sale' ||
-        billInput.txnType === 'Delivery Challan' ||
-        billInput.txnType === 'Purchase Return'
-          ? -1
-          : billInput.txnType === 'Purchase Invoice' || billInput.txnType === 'Sale Return'
-          ? 1
-          : 0;
+    // 2. Adjust Item Stock & Auto-save New Items to Catalog
+    const newMultiplier = getStockMultiplier(billInput.txnType);
+    const oldMultiplier = prevBill ? getStockMultiplier(prevBill.txnType) : 0;
 
+    if (prevBill) {
+      // Compute net stock delta per catalog item ID between old and new items
+      const deltaByItemId = new Map<string, number>();
+      if (oldMultiplier !== 0) {
+        for (const line of prevBill.items) {
+          const match = catalogItems.find(
+            (c) =>
+              (line.itemId && c.id === line.itemId) ||
+              c.name.trim().toLowerCase() === line.name.trim().toLowerCase()
+          );
+          if (match) {
+            deltaByItemId.set(
+              match.id,
+              (deltaByItemId.get(match.id) || 0) - oldMultiplier * line.qty
+            );
+          }
+        }
+      }
+      if (newMultiplier !== 0) {
+        for (const line of billInput.items) {
+          const match = catalogItems.find(
+            (c) =>
+              (line.itemId && c.id === line.itemId) ||
+              c.name.trim().toLowerCase() === line.name.trim().toLowerCase()
+          );
+          if (match) {
+            deltaByItemId.set(
+              match.id,
+              (deltaByItemId.get(match.id) || 0) + newMultiplier * line.qty
+            );
+          }
+        }
+      }
+      for (const [catId, deltaQty] of deltaByItemId.entries()) {
+        if (deltaQty !== 0) {
+          const catMatch = catalogItems.find((c) => c.id === catId);
+          if (catMatch) {
+            await upsertCatalogItem(uid, {
+              ...catMatch,
+              stockQty: Math.max(0, catMatch.stockQty + deltaQty),
+            });
+          }
+        }
+      }
+    } else if (billInput.items.length > 0) {
       for (const line of billInput.items) {
         const catMatch = catalogItems.find(
           (c) =>
             (line.itemId && c.id === line.itemId) ||
-            c.name.toLowerCase() === line.name.trim().toLowerCase()
+            c.name.trim().toLowerCase() === line.name.trim().toLowerCase()
         );
         if (catMatch) {
-          if (stockMultiplier !== 0) {
+          if (newMultiplier !== 0) {
             await upsertCatalogItem(uid, {
               ...catMatch,
-              stockQty: Math.max(0, catMatch.stockQty + stockMultiplier * line.qty),
+              stockQty: Math.max(0, catMatch.stockQty + newMultiplier * line.qty),
             });
           }
         } else if (shopSettings.saveNewItemsToCatalog && line.name.trim()) {
@@ -381,7 +453,7 @@ export default function App() {
             unit: line.unit || 'pcs',
             salePrice: isPurchaseSide ? Math.round(line.rate * 1.15) : line.rate,
             purchasePrice: isPurchaseSide ? line.rate : Math.round(line.rate * 0.85),
-            stockQty: stockMultiplier > 0 ? line.qty : 0,
+            stockQty: newMultiplier > 0 ? line.qty : 0,
             barcode: '',
             hsn: '',
             gstPercent: line.gstPercent || 0,
@@ -741,7 +813,7 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
+                        <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100">
                           <button
                             onClick={() =>
                               downloadBillInvoicePDF(
@@ -869,10 +941,11 @@ export default function App() {
             businessProfile={businessProfile}
             shopSettings={shopSettings}
             onSaveParty={async (p) => {
+              const existing = p.id ? parties.find((x) => x.id === p.id) : undefined;
               await upsertParty(user.uid, {
                 ...p,
                 ownerId: user.uid,
-                createdAt: new Date().toISOString().slice(0, 40),
+                createdAt: existing?.createdAt || new Date().toISOString().slice(0, 40),
                 updatedAt: new Date().toISOString().slice(0, 40),
               });
               showToast('Party saved!');
@@ -910,8 +983,47 @@ export default function App() {
               setTxnFormOpen(true);
             }}
             onDeleteBill={async (id) => {
+              const target = bills.find((b) => b.id === id);
+              if (target) {
+                if (target.txnType !== 'Expense') {
+                  const delta = getPartyBalanceDelta(
+                    target.txnType,
+                    target.totalAmount,
+                    target.balanceDue
+                  );
+                  if (delta !== 0) {
+                    const party = parties.find(
+                      (p) =>
+                        (target.partyId && p.id === target.partyId) ||
+                        p.name.trim().toLowerCase() === target.partyName.trim().toLowerCase()
+                    );
+                    if (party) {
+                      await upsertParty(user.uid, {
+                        ...party,
+                        balance: Math.round((party.balance - delta) * 100) / 100,
+                      });
+                    }
+                  }
+                }
+                const mult = getStockMultiplier(target.txnType);
+                if (mult !== 0 && target.items.length > 0) {
+                  for (const line of target.items) {
+                    const cat = catalogItems.find(
+                      (c) =>
+                        (line.itemId && c.id === line.itemId) ||
+                        c.name.trim().toLowerCase() === line.name.trim().toLowerCase()
+                    );
+                    if (cat) {
+                      await upsertCatalogItem(user.uid, {
+                        ...cat,
+                        stockQty: Math.max(0, cat.stockQty - mult * line.qty),
+                      });
+                    }
+                  }
+                }
+              }
               await removeBill(user.uid, id);
-              showToast('Bill deleted');
+              showToast('Bill deleted & balance updated');
             }}
             onDeletePhoto={async (id) => {
               await removeSavedBillPhoto(user.uid, id);
@@ -930,10 +1042,11 @@ export default function App() {
             items={catalogItems}
             shopSettings={shopSettings}
             onSaveItem={async (it) => {
+              const existing = it.id ? catalogItems.find((x) => x.id === it.id) : undefined;
               await upsertCatalogItem(user.uid, {
                 ...it,
                 ownerId: user.uid,
-                createdAt: new Date().toISOString().slice(0, 40),
+                createdAt: existing?.createdAt || new Date().toISOString().slice(0, 40),
                 updatedAt: new Date().toISOString().slice(0, 40),
               });
               showToast('Item saved to catalog!');

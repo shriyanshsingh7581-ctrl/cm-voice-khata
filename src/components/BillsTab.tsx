@@ -354,8 +354,8 @@ export const BillsTab: React.FC<BillsTabProps> = ({
                 </div>
 
                 {/* Action Strip */}
-                <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                  <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       onClick={() => handleDownloadPDF(bill)}
                       className="px-2.5 py-1.5 rounded-xl bg-[#FBF9F1] text-slate-700 text-xs font-bold flex items-center gap-1 hover:bg-slate-100"
@@ -466,8 +466,8 @@ export const BillsTab: React.FC<BillsTabProps> = ({
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between pt-2 border-t border-slate-100">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <button
                       onClick={() => onViewPhoto(photo)}
                       className="px-2.5 py-1.5 rounded-xl bg-[#FBF9F1] text-slate-700 text-xs font-bold flex items-center gap-1"

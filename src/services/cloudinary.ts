@@ -52,3 +52,72 @@ export function fileToBase64(file: File | Blob): Promise<{ base64: string; dataU
     reader.readAsDataURL(file);
   });
 }
+
+/**
+ * Compresses & resizes large mobile camera/gallery photos to <= 1600px JPEG (~180KB-450KB)
+ * so AI Vision scanning & Cloudinary uploads are fast and never hit payload/timeout limits on mobile networks.
+ */
+export async function compressImageForAI(
+  file: File | Blob,
+  maxDimension = 1600,
+  quality = 0.85
+): Promise<{ base64: string; dataUrl: string; mimeType: string; blob: Blob }> {
+  const original = await fileToBase64(file);
+
+  if (!file.type.startsWith('image/')) {
+    return { ...original, blob: file };
+  }
+
+  try {
+    const objectUrl = URL.createObjectURL(file);
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Image decode failed'));
+      el.src = objectUrl;
+    });
+    URL.revokeObjectURL(objectUrl);
+
+    let { width, height } = img;
+    if (width <= 0 || height <= 0) {
+      return { ...original, blob: file };
+    }
+
+    if (width > maxDimension || height > maxDimension) {
+      if (width >= height) {
+        height = Math.round((height * maxDimension) / width);
+        width = maxDimension;
+      } else {
+        width = Math.round((width * maxDimension) / height);
+        height = maxDimension;
+      }
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return { ...original, blob: file };
+    }
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    const base64 = dataUrl.split(',')[1] || original.base64;
+    const blob = await new Promise<Blob>((resolve) => {
+      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', quality);
+    });
+
+    return {
+      base64,
+      dataUrl,
+      mimeType: 'image/jpeg',
+      blob,
+    };
+  } catch {
+    return { ...original, blob: file };
+  }
+}

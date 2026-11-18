@@ -226,12 +226,24 @@ function normalizeParsedBill(
     }
   }
 
-  const discount = Number(raw.discount) || 0;
+  let discount = Number(raw.discount) || 0;
   const deliveryCharge = Number(raw.deliveryCharge) || 0;
   const gst = Number(raw.gst) || 0;
 
   const itemsSum = items.reduce((s, i) => s + i.total, 0);
   let totalAmount = Number(raw.totalAmount) || 0;
+
+  // Prevent double-subtracting per-item discounts when item line totals are already net of item discount
+  if (discount > 0 && itemsSum > 0 && totalAmount > 0) {
+    const taxableNoDisc = Math.max(0, itemsSum + deliveryCharge);
+    const estNoDisc = taxableNoDisc + taxableNoDisc * (gst / 100);
+    const taxableWithDisc = Math.max(0, itemsSum - discount + deliveryCharge);
+    const estWithDisc = taxableWithDisc + taxableWithDisc * (gst / 100);
+    if (Math.abs(estNoDisc - totalAmount) + 5 < Math.abs(estWithDisc - totalAmount)) {
+      discount = 0;
+    }
+  }
+
   if (totalAmount <= 0 && itemsSum > 0) {
     const taxable = Math.max(0, itemsSum - discount + deliveryCharge);
     totalAmount = Math.round((taxable + taxable * (gst / 100)) * 100) / 100;
@@ -254,10 +266,13 @@ function normalizeParsedBill(
   if (paymentType === 'Credit' && typeof raw.receivedAmount !== 'number') {
     receivedAmount = 0;
   }
-  const balanceDue =
+  let balanceDue =
     typeof raw.balanceDue === 'number'
       ? raw.balanceDue
       : Math.max(0, Math.round((totalAmount - receivedAmount) * 100) / 100);
+  if (paymentType === 'Credit' && receivedAmount < totalAmount && balanceDue <= 0) {
+    balanceDue = Math.max(0, Math.round((totalAmount - receivedAmount) * 100) / 100);
+  }
 
   return {
     partyName: String(raw.partyName || local.partyName || 'Cash Customer').trim(),
@@ -359,7 +374,7 @@ async function startServer() {
       // Layer 1B: Gemini Audio Transcription with retry & model failover
       const cleanMime = (mimeType.split(';')[0] || 'audio/webm').trim();
       const { response: geminiResp, model } = await generateContentWithFallback(
-        ['gemini-3.5-transcribe', 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
+        ['gemini-3.5-transcribe', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
         (m) => ({
           model: m,
           contents: {
@@ -548,24 +563,24 @@ Strict Rules:
       }
 
       const prompt = `Read this paper invoice/receipt image carefully and extract all billing details into JSON:
-- partyName (customer or supplier/shop name on the bill)
+- txnType ("Purchase Invoice" if this is a supplier tax invoice billed TO the buyer/shop, "Sale" if this is a customer receipt/bill, or "Expense")
+- partyName (for Purchase Invoice, extract the Supplier/Seller company name; for Sale, extract the Customer/Buyer name)
 - phone (phone number if visible, else "")
-- gstin (GSTIN if visible, else "")
+- gstin (counterparty GSTIN if visible, else "")
 - supplierBillNo (invoice/bill number on the paper bill, else "")
-- txnType ("Sale" or "Purchase Invoice" or "Expense")
-- items: array of line items [{ name, qty, unit, rate, total }]
-- discount (numeric discount in INR, default 0)
+- items: array of line items [{ name, qty, unit, rate, total }]. Set "total" to the net pre-tax line amount (after any per-item % discount) and "rate" to total/qty or net unit rate.
+- discount (ONLY extra bill-level discount deducted AFTER item subtotal, default 0 — do NOT copy per-item % discounts here)
 - deliveryCharge (numeric delivery/freight charge in INR, default 0)
-- gst (GST percentage like 0, 5, 12, 18, 28, default 0)
-- totalAmount (final bill total in INR)
-- receivedAmount (amount paid, default equal to totalAmount unless marked due/unpaid)
+- gst (combined GST percentage, e.g. CGST 9% + SGST 9% = 18, or IGST 18% = 18, or 0/5/12/18/28, default 0)
+- totalAmount (final printed Grand Total in INR)
+- receivedAmount (amount paid, default equal to totalAmount unless marked credit/due/unpaid)
 - balanceDue (balance unpaid, default 0)
 - paymentType ("Cash", "Online", or "Credit")
-- note (summary note)`;
+- note (short summary note)`;
 
       try {
         const { response, model } = await generateContentWithFallback(
-          ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
+          ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
           (m) => ({
             model: m,
             contents: {
@@ -618,7 +633,8 @@ Strict Rules:
                 },
               },
             },
-          })
+          }),
+          { timeoutMs: 14000 }
         );
 
         const rawParsed = JSON.parse(extractJsonText(response.text)) as Record<string, unknown>;
