@@ -3,7 +3,7 @@ import {
   getOpenRouterApiKey,
   getOpenRouterModels,
   OPENROUTER_CONFIG,
-} from './aiConfig';
+} from './aiConfig.js';
 
 export type NodeRequest = IncomingMessage & { body?: unknown };
 export type NodeResponse = ServerResponse;
@@ -29,29 +29,37 @@ export function applyCors(req: NodeRequest, res: NodeResponse): boolean {
 }
 
 export function sendJson(res: NodeResponse, status: number, payload: unknown): void {
+  if (res.headersSent) return;
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
 }
 
 export async function readJsonBody(req: NodeRequest): Promise<Record<string, unknown>> {
-  if (req.body !== undefined && req.body !== null) {
-    if (typeof req.body === 'string') {
+  let preParsed: unknown;
+  try {
+    preParsed = req.body;
+  } catch {
+    throw new HttpStatusError(400, 'Invalid JSON request body');
+  }
+
+  if (preParsed !== undefined && preParsed !== null) {
+    if (typeof preParsed === 'string') {
       try {
-        return JSON.parse(req.body) as Record<string, unknown>;
+        return JSON.parse(preParsed) as Record<string, unknown>;
       } catch {
         return {};
       }
     }
-    if (Buffer.isBuffer(req.body)) {
+    if (Buffer.isBuffer(preParsed)) {
       try {
-        return JSON.parse(req.body.toString('utf8')) as Record<string, unknown>;
+        return JSON.parse(preParsed.toString('utf8')) as Record<string, unknown>;
       } catch {
         return {};
       }
     }
-    if (typeof req.body === 'object') {
-      return req.body as Record<string, unknown>;
+    if (typeof preParsed === 'object') {
+      return preParsed as Record<string, unknown>;
     }
   }
 
@@ -290,7 +298,13 @@ async function callOpenRouterTtsStream(
 function extractJsonText(raw: string | undefined): string {
   const trimmed = (raw ?? '{}').trim();
   const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return fenceMatch ? fenceMatch[1].trim() : trimmed;
+  const candidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
+  const firstBrace = candidate.indexOf('{');
+  const lastBrace = candidate.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return candidate.slice(firstBrace, lastBrace + 1);
+  }
+  return candidate;
 }
 
 function getAudioFormatFromMime(mimeType: string): string {

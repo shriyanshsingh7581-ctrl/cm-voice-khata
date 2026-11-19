@@ -10,7 +10,7 @@ import {
   handleScanBill,
   handleTranscribe,
   handleTts,
-} from './api/_lib/openrouter';
+} from './api/_lib/openrouter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -1,4 +1,4 @@
-import { handleTranscribe, type NodeRequest, type NodeResponse } from '../_lib/openrouter';
+import { handleTranscribe, type NodeRequest, type NodeResponse } from '../_lib/openrouter.js';
 
 export default async function handler(req: NodeRequest, res: NodeResponse) {
   return handleTranscribe(req, res);

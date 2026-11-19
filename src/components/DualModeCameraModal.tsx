@@ -356,7 +356,13 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         try {
           parsedErr = (JSON.parse(rawErr) as { error?: string }).error || '';
         } catch {
-          // non-JSON response (e.g. 502/413/404 gateway HTML)
+          const cleanText = rawErr
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (cleanText && cleanText.length <= 160) {
+            parsedErr = cleanText;
+          }
         }
         throw new Error(
           parsedErr ||
