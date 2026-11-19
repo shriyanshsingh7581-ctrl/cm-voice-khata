@@ -204,7 +204,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     const video = videoRef.current;
     let width = video.videoWidth || 1280;
     let height = video.videoHeight || 720;
-    const maxDim = 1600;
+    const maxDim = 1400;
     if (width > maxDim || height > maxDim) {
       if (width >= height) {
         height = Math.round((height * maxDim) / width);
@@ -221,7 +221,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
     const base64 = dataUrl.split(',')[1] || '';
     setCapturedDataUrl(dataUrl);
     setCapturedBase64(base64);
@@ -231,7 +231,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         if (blob) setCapturedFile(blob);
       },
       'image/jpeg',
-      0.85
+      0.82
     );
     stopCamera();
   };
@@ -277,7 +277,7 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         return;
       }
 
-      const compressed = await compressImageForAI(file, 1600, 0.85);
+      const compressed = await compressImageForAI(file, 1400, 0.82);
       setCapturedDataUrl(compressed.dataUrl);
       setCapturedBase64(compressed.base64);
       setCapturedMimeType(compressed.mimeType);
@@ -360,10 +360,12 @@ export const DualModeCameraModal: React.FC<DualModeCameraModalProps> = ({
         }
         throw new Error(
           parsedErr ||
-            (aiRes.status === 413
+            (aiRes.status === 401
+              ? 'OPENROUTER_API_KEY is missing or invalid in Vercel Environment Variables. Add it and Redeploy.'
+              : aiRes.status === 413
               ? 'Photo size is too large. Please retake or crop closer to the bill.'
               : aiRes.status === 404
-              ? 'AI backend server (/api/ai/scan-bill) not found (404). Make sure Node backend (npm start) is running or set VITE_API_BASE_URL for static APK builds.'
+              ? 'AI endpoint (/api/ai/scan-bill) returned 404. Redeploy on Vercel with the latest vercel.json & api/ folder.'
               : `AI scanning failed (${aiRes.status}). Please retry or save Normal Photo.`)
         );
       }
